@@ -1,0 +1,26 @@
+{
+  "name": "chatgpt-review",
+  "productName": "ChatGPT Review",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Automatic pull request review with ChatGPT Web, Jira context and local spec RAG",
+  "license": "MIT",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "dev": "npm run build && electron .",
+    "start": "npm run build && electron ."
+  },
+  "dependencies": {
+    "mammoth": "^1.10.0",
+    "pdf-parse": "1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "electron": "43.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.8"
+  }
+}
