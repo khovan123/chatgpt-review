@@ -1,1 +1,156 @@
-# chatgpt-review
+# ChatGPT Review
+
+Desktop PR-review app that uses **ChatGPT Web only** for model reasoning. Reviews are event-driven from signed GitHub webhooks and combine the exact PR/head diff, Jira evidence fetched through ChatGPT's Atlassian connector, and attached specification files used as local RAG memory.
+
+## Event-driven flow
+
+There is no recurring PR polling loop.
+
+```text
+GitHub pull_request webhook
+  -> user's personal Cloudflare named tunnel
+  -> signed local webhook ingress
+  -> delivery idempotency check
+  -> linked repository lookup
+  -> re-read exact PR + current head SHA through gh
+  -> Jira key mapping from PR title/description
+  -> Jira evidence through ChatGPT Atlassian connector
+  -> relevant spec-memory retrieval
+  -> bounded diff review chunks in ChatGPT Web
+  -> final synthesis
+  -> optional GitHub PR comment
+```
+
+Automatic review triggers on `pull_request` actions that can materially change review evidence: `opened`, `reopened`, `synchronize`, `ready_for_review`, and `edited`. `closed` updates the active PR list but does not run a review. A webhook head SHA that no longer matches GitHub's current PR head is ignored as stale.
+
+## Repository management
+
+The app manages multiple repositories. Linking a repository validates access through the authenticated `gh` CLI and automatically creates or updates its GitHub `pull_request` webhook using `gh api`. Unlinking attempts to remove the managed hook.
+
+Each repository stores its webhook id/health, last delivery/event/error, open PRs, and review history. Repository linking is blocked until the user's personal Cloudflare route has been verified end to end.
+
+## Personal Cloudflare named tunnel
+
+Public webhook ingress is intentionally **per user**. The app does not provision or use a shared server-side Cloudflare account/tunnel and it never falls back to Cloudflare Quick Tunnels (`*.trycloudflare.com`).
+
+### Automatic first-time provisioning
+
+The default onboarding uses a **one-time Cloudflare API token owned by the user**. The token should be scoped only to the Cloudflare account/zones the user wants this installation to manage, with:
+
+- Account → Cloudflare Tunnel → Edit;
+- Zone → DNS → Edit;
+- Zone → Zone → Read.
+
+In **Settings → Connections** the user pastes the API token and selects **Discover zones**. The token is sent only to the Electron main process, kept only in an in-memory setup session, automatically erased after 10 minutes if unused, consumed when provisioning starts, and never written to application state or returned to the renderer.
+
+After the user selects one discovered zone and an optional hostname label, the app performs the complete Cloudflare bootstrap inside that user's account:
+
+1. verifies the requested hostname is not already occupied;
+2. creates a remotely-managed **Named Tunnel**;
+3. writes the remote tunnel ingress configuration so the selected hostname proxies to the local webhook origin (default `http://127.0.0.1:8787`) with a final `http_status:404` catch-all rule;
+4. creates a proxied CNAME `<hostname> -> <tunnel-id>.cfargotunnel.com`;
+5. obtains the named tunnel **runtime token**;
+6. persists only the Cloudflare resource identifiers needed for deterministic cleanup (account, zone, tunnel and DNS record ids);
+7. stores the runtime tunnel token outside the repository with app-owned permissions;
+8. starts `cloudflared` with `--token-file`;
+9. replaces `HOME` / `USERPROFILE` with an isolated app-owned directory, preventing fallback to `~/.cloudflared`, `cert.pem`, or another Cloudflare account already authenticated on the machine;
+10. verifies `https://<hostname>/healthz` reaches this exact application;
+11. derives the GitHub webhook endpoint as `https://<hostname>/webhooks/v1/github`;
+12. only then allows repositories to be linked and their GitHub webhooks to be created/synchronized.
+
+If a Cloudflare API call fails during provisioning, resources already created by that attempt are rolled back when possible. If the Cloudflare resources were successfully created but the local `cloudflared` process or public health check is not ready yet, the resource metadata and runtime token remain local so the connector can be restarted without asking for the provisioning API token again.
+
+The provisioning API token is **not retained for runtime**. If the user later chooses **Delete tunnel + DNS**, the UI asks for a fresh user-owned API token and deletes exactly the persisted DNS record and named tunnel before removing the local runtime token.
+
+While a named tunnel is connected, the local webhook host/port is locked because the remote ingress configuration points at that origin. Disconnect/deprovision before changing it.
+
+### Existing named tunnel (advanced)
+
+Users who already own a remotely-managed named tunnel can still use **Advanced: connect an existing remotely-managed named tunnel** and supply its hostname plus runtime token. The same isolated `cloudflared` runtime, Quick-Tunnel rejection and end-to-end health verification apply.
+
+The local listener defaults to:
+
+```text
+http://127.0.0.1:8787
+```
+
+## Webhook security
+
+- app-generated 32-byte GitHub webhook secret stored outside the repository;
+- GitHub `X-Hub-Signature-256` HMAC-SHA256 validation over the exact raw body before JSON parsing;
+- bounded `X-GitHub-Delivery` and `X-GitHub-Event` headers;
+- 256 KiB request-body limit;
+- delivery id + raw-body SHA-256 persisted for restart-safe idempotency;
+- same delivery id with a different payload is rejected;
+- unknown/unlinked repositories are rejected;
+- exact current GitHub head SHA is re-read before automatic review.
+
+## ChatGPT Web lane
+
+No OpenAI API/model API is used. The ChatGPT browser window uses a dedicated persistent Electron partition with `nodeIntegration: false`, `contextIsolation: true`, Chromium sandboxing, no preload bridge exposed to `chatgpt.com`, restricted navigation, task-bound structured responses, bounded prompts/responses, and secret redaction before diff content is sent.
+
+## Jira mapping
+
+Jira keys matching `PROJECT-123` are collected deterministically from PR title first and description second, with duplicates removed. When a key exists, ChatGPT must use the Atlassian/Jira connector and return exact issue context. Returned keys must match keys extracted from the PR. By default the review fails closed when a referenced Jira issue cannot be resolved.
+
+## Spec memory / RAG
+
+Attached PDF, DOCX, Markdown, text, JSON, YAML, CSV and source-text files are extracted and persisted as application-owned text chunks. Retrieval is local BM25-style lexical ranking with additional Jira-key relevance. No embedding/model API is required.
+
+## UI
+
+The primary UI follows the SourceNerve workspace pattern:
+
+- sidebar CTA to add a repository;
+- connected repository list with webhook health;
+- selecting a repository shows its open PRs and auto-selects the first open non-draft PR;
+- selecting a PR shows only that PR's review history;
+- all external connection/configuration management lives inside the Settings modal;
+- Cloudflare, GitHub, ChatGPT Web, review behavior, repositories, and spec memory are managed from Settings.
+
+## Requirements
+
+- Node.js 22.12+
+- `cloudflared` available on `PATH`
+- a Cloudflare account with at least one active zone for automatic provisioning
+- a one-time user-owned Cloudflare API token scoped to Cloudflare Tunnel Edit, DNS Edit, and Zone Read (or, in Advanced mode, an existing named-tunnel hostname + runtime token)
+- authenticated GitHub CLI (`gh auth login`)
+- GitHub permission to manage repository webhooks
+- a ChatGPT Web account signed in inside the app review window
+- Atlassian/Jira connector enabled in that ChatGPT session when Jira-backed review is required
+
+## Run
+
+```bash
+npm install
+npm test
+npm run typecheck
+npm run dev
+```
+
+Then:
+
+1. Create a least-privilege Cloudflare API token in the user's own Cloudflare account.
+2. In **Settings → Connections**, paste it once and select **Discover zones**. Choose a zone and optionally a hostname label, then select **Create tunnel + DNS + ingress**.
+3. The app creates the named tunnel, ingress and DNS in that user's account, obtains/stores only the runtime tunnel token, discards the provisioning API token, starts `cloudflared`, and verifies the public route.
+4. Open ChatGPT Web, sign in, and enable the Atlassian/Jira connector.
+5. In **Settings → Repositories**, link one or more GitHub repositories. Their webhooks are created automatically against the verified personal endpoint.
+6. Attach specification memory if needed.
+7. GitHub PR events trigger reviews directly through the signed webhook path.
+8. Optionally enable posting completed reviews back to GitHub.
+
+## Review state machine
+
+```text
+webhook/manual trigger
+  -> queued
+  -> collecting-pr
+  -> resolving-jira
+  -> retrieving-spec
+  -> reviewing-diff (1..N chunks)
+  -> synthesizing
+  -> posting-comment (optional)
+  -> completed
+
+Any review stage may -> blocked / failed
+```

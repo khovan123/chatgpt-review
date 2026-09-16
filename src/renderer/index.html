@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+  <title>ChatGPT Review</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="desktop-shell">
+    <aside class="app-sidebar" aria-label="Repository navigation">
+      <div class="brand-row">
+        <div class="brand-mark" aria-hidden="true">CR</div>
+        <div class="brand-copy">
+          <strong>ChatGPT Review</strong>
+          <span>PR review workspace</span>
+        </div>
+        <button id="toggleSidebar" class="collapse-button sidebar-collapse-button" type="button" aria-label="Collapse repository sidebar" title="Collapse repository sidebar">‹</button>
+      </div>
+
+      <button id="addRepository" class="sidebar-cta" type="button">
+        <span class="sidebar-cta-icon" aria-hidden="true">+</span>
+        <span class="sidebar-cta-label">Add repository</span>
+      </button>
+
+      <nav class="sidebar-scroll" aria-label="Connected repositories">
+        <div class="sidebar-section-heading">
+          <span>Repositories</span>
+          <span id="repoCount" class="sidebar-count">0</span>
+        </div>
+        <div id="sidebarRepositories" class="sidebar-repositories"></div>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button id="openSettings" class="sidebar-settings" type="button">
+          <span class="settings-glyph" aria-hidden="true">⚙</span>
+          <span class="sidebar-settings-label">Settings</span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="workspace-surface">
+      <section id="notice" class="notice hidden" role="status"></section>
+
+      <div class="review-workspace">
+        <section class="pr-column" aria-label="Open pull requests">
+          <div class="column-header">
+            <div class="pr-column-heading">
+              <p class="column-eyebrow">OPEN</p>
+              <h2>Pull requests</h2>
+            </div>
+            <div class="pr-column-controls">
+              <span id="prCount" class="count-pill">0</span>
+              <button id="togglePrColumn" class="collapse-button pr-collapse-button" type="button" aria-label="Collapse pull request list" title="Collapse pull request list">‹</button>
+            </div>
+          </div>
+          <div id="pullRequests" class="pr-list"></div>
+        </section>
+
+        <section class="review-detail" aria-label="Pull request review history">
+          <div id="prEmptyState" class="detail-empty">
+            <div class="empty-icon" aria-hidden="true">↗</div>
+            <h2>Select a pull request</h2>
+            <p>Choose an open pull request to inspect its automatic and manual review history.</p>
+          </div>
+
+          <div id="prDetail" class="hidden">
+            <header class="pr-detail-header">
+              <div class="pr-detail-title-group">
+                <div class="pr-detail-label-row">
+                  <span id="selectedPrNumber" class="mono-label"></span>
+                  <span id="selectedPrDraft" class="badge warning hidden">draft</span>
+                </div>
+                <h2 id="selectedPrTitle"></h2>
+                <p id="selectedPrMeta" class="pr-detail-meta"></p>
+              </div>
+              <div class="workspace-actions">
+                <button id="openSelectedPr" class="button secondary" type="button">Open PR</button>
+                <button id="reviewSelectedPr" class="button" type="button">Review now</button>
+              </div>
+            </header>
+
+            <div class="history-heading">
+              <div>
+                <p class="column-eyebrow">HISTORY</p>
+                <h3>Review runs</h3>
+              </div>
+              <span id="historyCount" class="count-pill">0</span>
+            </div>
+            <div id="reviews" class="review-list"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="settingsModal" class="modal-backdrop hidden" role="presentation">
+    <section class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
+      <button id="closeSettings" class="modal-close" type="button" aria-label="Close settings">×</button>
+
+      <aside class="settings-sidebar">
+        <div class="settings-title">Settings</div>
+        <nav class="settings-nav" aria-label="Settings sections">
+          <button class="settings-nav-item active" data-settings-section="connections" type="button">
+            <span aria-hidden="true">↔</span><span>Connections</span>
+          </button>
+          <button class="settings-nav-item" data-settings-section="repositories" type="button">
+            <span aria-hidden="true">▱</span><span>Repositories</span>
+          </button>
+          <button class="settings-nav-item" data-settings-section="review" type="button">
+            <span aria-hidden="true">✓</span><span>Review</span>
+          </button>
+          <button class="settings-nav-item" data-settings-section="memory" type="button">
+            <span aria-hidden="true">◇</span><span>Spec memory</span>
+          </button>
+        </nav>
+      </aside>
+
+      <div class="settings-content">
+        <section class="settings-panel" data-settings-panel="connections">
+          <div class="settings-panel-header">
+            <h2>Connections</h2>
+            <p>GitHub, ChatGPT Web and webhook ingress are local to this installation. Public ingress uses a named tunnel inside your own Cloudflare account.</p>
+          </div>
+          <div id="connections" class="connection-list"></div>
+
+          <div class="settings-form settings-form-separated personal-cloudflare-form">
+            <div class="connection-policy-note">
+              <strong>Personal Cloudflare only · automatic setup</strong>
+              <span>No shared server tunnel and no Quick Tunnel fallback. A one-time API token creates the named tunnel, remote ingress and proxied DNS record in your own account. The API token is held only in main-process memory during setup and is discarded after provisioning.</span>
+            </div>
+
+            <form id="cloudflareApiForm" class="provision-step">
+              <label class="setting-row stacked">
+                <span class="setting-copy">
+                  <strong>One-time Cloudflare API token</strong>
+                  <span>Required permissions: Account · Cloudflare Tunnel · Edit, Zone · DNS · Edit, and Zone · Zone · Read. Scope it only to the account and zones you want this app to manage.</span>
+                </span>
+                <input id="cloudflareApiToken" type="password" placeholder="Paste one-time Cloudflare API token" autocomplete="new-password" spellcheck="false" />
+              </label>
+              <div class="settings-form-actions right">
+                <button id="cloudflareDiscoverZones" class="button" type="submit">Discover zones</button>
+              </div>
+            </form>
+
+            <form id="cloudflareProvisionForm" class="provision-step hidden">
+              <div class="setting-grid">
+                <label class="setting-field">
+                  <span>Cloudflare zone</span>
+                  <select id="cloudflareZone"></select>
+                </label>
+                <label class="setting-field">
+                  <span>Hostname label (optional)</span>
+                  <input id="cloudflareHostnameLabel" type="text" placeholder="auto: chatgpt-review-xxxxxxxx" autocomplete="off" spellcheck="false" />
+                </label>
+              </div>
+              <div id="cloudflareSetupStatus" class="setup-session-note"></div>
+              <div class="settings-form-actions right">
+                <button id="cloudflareProvisionButton" class="button" type="submit">Create tunnel + DNS + ingress</button>
+              </div>
+            </form>
+
+            <div id="cloudflareProvisioned" class="provisioned-cloudflare hidden">
+              <div class="provisioned-title-row">
+                <div>
+                  <strong>App-managed Cloudflare resources</strong>
+                  <span>These IDs are persisted so cleanup can target only resources created by this installation.</span>
+                </div>
+                <span class="badge success">managed</span>
+              </div>
+              <div id="cloudflareProvisionedDetails" class="repository-settings-details"></div>
+              <form id="cloudflareRemoveForm" class="danger-zone-form">
+                <label class="setting-row stacked">
+                  <span class="setting-copy">
+                    <strong>Remove managed Cloudflare resources</strong>
+                    <span>Re-enter a Cloudflare API token with the same permissions. The app deletes the exact managed DNS record and named tunnel, then removes the local runtime tunnel token.</span>
+                  </span>
+                  <input id="cloudflareRemoveApiToken" type="password" placeholder="Cloudflare API token for cleanup" autocomplete="new-password" spellcheck="false" />
+                </label>
+                <div class="settings-form-actions right">
+                  <button id="removeCloudflareResources" class="button danger" type="submit">Delete tunnel + DNS</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="derived-endpoint-row">
+              <span>GitHub webhook endpoint</span>
+              <code id="cloudflareEndpoint">Not connected</code>
+            </div>
+            <div class="settings-form-actions">
+              <div class="button-row">
+                <button id="restartCloudflare" class="button secondary" type="button">Restart connector</button>
+                <button id="disconnectCloudflare" class="button danger" type="button">Disconnect local tunnel</button>
+              </div>
+            </div>
+
+            <details id="manualCloudflareDetails" class="advanced-connection">
+              <summary>Advanced: connect an existing remotely-managed named tunnel</summary>
+              <form id="cloudflareForm" class="settings-form manual-cloudflare-form">
+                <label class="setting-row stacked">
+                  <span class="setting-copy">
+                    <strong>Existing public hostname</strong>
+                    <span>The hostname must already be configured in that named tunnel to route to this app's local ingress.</span>
+                  </span>
+                  <input id="cloudflareHostname" type="text" placeholder="review.yourdomain.com" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="setting-row stacked">
+                  <span class="setting-copy">
+                    <strong>Existing named tunnel token</strong>
+                    <span>Stored in app-owned credential storage and never returned to the renderer after save.</span>
+                  </span>
+                  <input id="cloudflareTunnelToken" type="password" placeholder="Paste Cloudflare tunnel token" autocomplete="new-password" spellcheck="false" />
+                </label>
+                <div class="settings-form-actions right">
+                  <button class="button secondary" type="submit">Connect existing tunnel</button>
+                </div>
+              </form>
+            </details>
+          </div>
+
+          <form id="connectionForm" class="settings-form settings-form-separated">
+            <div class="setting-grid">
+              <label class="setting-field">
+                <span>Local listen host</span>
+                <select id="webhookListenHost">
+                  <option value="127.0.0.1">127.0.0.1</option>
+                  <option value="0.0.0.0">0.0.0.0</option>
+                  <option value="::1">::1</option>
+                  <option value="::">::</option>
+                </select>
+              </label>
+              <label class="setting-field">
+                <span>Local listen port</span>
+                <input id="webhookListenPort" type="number" min="1024" max="65535" step="1" />
+              </label>
+            </div>
+            <div class="settings-form-actions">
+              <button id="chatgptSetup" class="button secondary" type="button">Open ChatGPT Web</button>
+              <button class="button" type="submit">Save local ingress</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="settings-panel hidden" data-settings-panel="repositories">
+          <div class="settings-panel-header">
+            <h2>Repositories</h2>
+            <p>Connect repositories here. A verified personal Cloudflare named tunnel is required; then the app automatically creates and maintains each GitHub webhook.</p>
+          </div>
+          <form id="repoLinkForm" class="repo-link-form">
+            <input id="repoInput" placeholder="owner/repository or https://github.com/owner/repository" autocomplete="off" />
+            <button id="repoConnectButton" class="button" type="submit">Connect repository</button>
+          </form>
+          <div id="settingsRepositories" class="settings-repository-list"></div>
+        </section>
+
+        <section class="settings-panel hidden" data-settings-panel="review">
+          <div class="settings-panel-header">
+            <h2>Review behavior</h2>
+            <p>Control automatic review triggers and evidence requirements.</p>
+          </div>
+          <form id="reviewSettingsForm" class="settings-form">
+            <label class="setting-row toggle-setting">
+              <span class="setting-copy"><strong>Automatic review</strong><span>Review PRs when GitHub sends supported pull_request webhook events.</span></span>
+              <input id="autoReview" type="checkbox" />
+            </label>
+            <label class="setting-row toggle-setting">
+              <span class="setting-copy"><strong>Post GitHub comment</strong><span>Post the final synthesized review back to the pull request.</span></span>
+              <input id="postComment" type="checkbox" />
+            </label>
+            <label class="setting-row toggle-setting">
+              <span class="setting-copy"><strong>Include draft PRs</strong><span>Allow draft pull requests to enter the automatic review queue.</span></span>
+              <input id="reviewDrafts" type="checkbox" />
+            </label>
+            <label class="setting-row toggle-setting">
+              <span class="setting-copy"><strong>Require Jira evidence</strong><span>Fail closed when a Jira key is present but exact issue context cannot be fetched.</span></span>
+              <input id="requireJira" type="checkbox" />
+            </label>
+            <div class="settings-form-actions right">
+              <button class="button" type="submit">Save review settings</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="settings-panel hidden" data-settings-panel="memory">
+          <div class="settings-panel-header inline">
+            <div>
+              <h2>Spec memory</h2>
+              <p>Attach product and technical specifications used as local review RAG memory.</p>
+            </div>
+            <button id="attachSpec" class="button" type="button">Attach spec</button>
+          </div>
+          <div id="specs" class="spec-list"></div>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
