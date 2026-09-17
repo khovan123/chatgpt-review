@@ -14,7 +14,7 @@ import {
 
 export class StateStore {
   private state: PersistedState = {
-    version: 3,
+    version: 4,
     config: { ...DEFAULT_CONFIG },
     cloudflareProvisioning: null,
     repositories: [],
@@ -91,10 +91,69 @@ export class StateStore {
     return this.upsertRepository(existing);
   }
 
-  async updateRepositoryChatConversation(fullName: string, conversationUrl: string): Promise<RepositoryRecord> {
+  async updateRepositoryChatProject(fullName: string, projectUrl: string): Promise<RepositoryRecord> {
     const existing = this.getRepository(fullName);
     if (!existing) throw new Error(`Repository ${fullName} is not linked.`);
-    existing.chatgptConversationUrl = sanitizeChatGptConversationUrl(conversationUrl);
+    const nextProjectUrl = sanitizeChatGptProjectUrl(projectUrl);
+    if (existing.chatgptProjectUrl !== nextProjectUrl) existing.chatgptPrConversations = [];
+    existing.chatgptProjectUrl = nextProjectUrl;
+    return this.upsertRepository(existing);
+  }
+
+  async replaceRepositoryChatProject(
+    fullName: string,
+    expectedProjectUrl: string,
+    projectUrl: string,
+  ): Promise<RepositoryRecord> {
+    const existing = this.getRepository(fullName);
+    if (!existing) throw new Error(`Repository ${fullName} is not linked.`);
+    const expected = sanitizeChatGptProjectUrl(expectedProjectUrl);
+    const current = existing.chatgptProjectUrl ? sanitizeChatGptProjectUrl(existing.chatgptProjectUrl) : "";
+    if (current !== expected) {
+      throw new Error(`ChatGPT repository project changed concurrently for ${existing.fullName}. Retry the review.`);
+    }
+    existing.chatgptProjectUrl = sanitizeChatGptProjectUrl(projectUrl);
+    existing.chatgptPrConversations = [];
+    return this.upsertRepository(existing);
+  }
+
+  getPullRequestChatConversation(fullName: string, prNumber: number): string | undefined {
+    const existing = this.getRepository(fullName);
+    return existing?.chatgptPrConversations.find((binding) => binding.prNumber === prNumber)?.conversationUrl;
+  }
+
+  async updatePullRequestChatConversation(fullName: string, prNumber: number, conversationUrl: string): Promise<RepositoryRecord> {
+    const existing = this.getRepository(fullName);
+    if (!existing) throw new Error(`Repository ${fullName} is not linked.`);
+    if (!existing.chatgptProjectUrl) throw new Error(`Repository ${fullName} does not have a ChatGPT project.`);
+    const normalized = sanitizeChatGptConversationUrl(conversationUrl);
+    const updatedAt = new Date().toISOString();
+    existing.chatgptPrConversations = [
+      { prNumber: sanitizePrNumber(prNumber), conversationUrl: normalized, updatedAt },
+      ...existing.chatgptPrConversations.filter((binding) => binding.prNumber !== prNumber),
+    ].slice(0, 500);
+    return this.upsertRepository(existing);
+  }
+
+  async replacePullRequestChatConversation(
+    fullName: string,
+    prNumber: number,
+    expectedConversationUrl: string,
+    conversationUrl: string,
+  ): Promise<RepositoryRecord> {
+    const existing = this.getRepository(fullName);
+    if (!existing) throw new Error(`Repository ${fullName} is not linked.`);
+    const number = sanitizePrNumber(prNumber);
+    const expected = sanitizeChatGptConversationUrl(expectedConversationUrl);
+    const current = existing.chatgptPrConversations.find((binding) => binding.prNumber === number)?.conversationUrl ?? "";
+    if (current !== expected) {
+      throw new Error(`ChatGPT PR conversation changed concurrently for ${existing.fullName} PR #${number}. Retry the review.`);
+    }
+    const normalized = sanitizeChatGptConversationUrl(conversationUrl);
+    existing.chatgptPrConversations = [
+      { prNumber: number, conversationUrl: normalized, updatedAt: new Date().toISOString() },
+      ...existing.chatgptPrConversations.filter((binding) => binding.prNumber !== number),
+    ].slice(0, 500);
     return this.upsertRepository(existing);
   }
 
@@ -164,20 +223,8 @@ function migrateState(input: unknown): PersistedState {
   const cloudflareProvisioning = safeCloudflareProvisioning(value.cloudflareProvisioning);
   const reviews = Array.isArray(value.reviews) ? value.reviews.filter(isReviewRecord).slice(0, 1000) : [];
 
-  // Older builds stored the ChatGPT URL only on each review run. Migrate one
-  // canonical conversation per repository so all future PR reviews reuse it.
-  for (const repository of repositories) {
-    if (repository.chatgptConversationUrl) continue;
-    const candidate = reviews
-      .filter((review) => review.repository.toLowerCase() === repository.fullName.toLowerCase())
-      .filter((review) => safeChatGptConversationUrl(review.conversationUrl))
-      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
-    const migratedUrl = safeChatGptConversationUrl(candidate?.conversationUrl);
-    if (migratedUrl) repository.chatgptConversationUrl = migratedUrl;
-  }
-
   return {
-    version: 3,
+    version: 4,
     config,
     cloudflareProvisioning,
     repositories,
@@ -193,6 +240,7 @@ export function makeRepository(fullName: string, lastError?: string): Repository
     fullName: normalized,
     addedAt: new Date().toISOString(),
     enabled: true,
+    chatgptPrConversations: [],
     webhook: {
       hookId: null,
       targetUrl: "",
@@ -257,7 +305,8 @@ function sanitizeRepository(value: RepositoryRecord): RepositoryRecord {
     fullName,
     addedAt: typeof value.addedAt === "string" ? value.addedAt : new Date().toISOString(),
     enabled: value.enabled !== false,
-    ...(safeChatGptConversationUrl(value.chatgptConversationUrl) ? { chatgptConversationUrl: safeChatGptConversationUrl(value.chatgptConversationUrl)! } : {}),
+    ...(safeChatGptProjectUrl(value.chatgptProjectUrl) ? { chatgptProjectUrl: safeChatGptProjectUrl(value.chatgptProjectUrl)! } : {}),
+    chatgptPrConversations: sanitizePrConversationBindings(value.chatgptPrConversations),
     webhook: {
       hookId: Number.isSafeInteger(webhook.hookId) && Number(webhook.hookId) > 0 ? Number(webhook.hookId) : null,
       targetUrl: typeof webhook.targetUrl === "string" ? webhook.targetUrl.slice(0, 2048) : "",
@@ -331,7 +380,11 @@ function safeChatGptConversationUrl(value: unknown): string {
   try {
     const url = new URL(value.trim());
     if (url.protocol !== "https:" || url.hostname !== "chatgpt.com") return "";
-    if (url.pathname === "/" || url.pathname.length < 3) return "";
+    const segments = url.pathname.split("/").filter(Boolean);
+    const conversationIndex = segments.findIndex((segment) => segment === "c");
+    if (conversationIndex < 0 || !segments[conversationIndex + 1]) return "";
+    if (url.pathname.length > 1 && url.pathname.endsWith("/")) url.pathname = url.pathname.slice(0, -1);
+    url.search = "";
     url.hash = "";
     const normalized = url.toString();
     return normalized.length <= 2048 ? normalized : "";
@@ -342,8 +395,64 @@ function safeChatGptConversationUrl(value: unknown): string {
 
 function sanitizeChatGptConversationUrl(value: unknown): string {
   const normalized = safeChatGptConversationUrl(value);
-  if (!normalized) throw new Error("ChatGPT repository conversation URL is invalid.");
+  if (!normalized) throw new Error("ChatGPT PR conversation URL is invalid.");
   return normalized;
+}
+
+function safeChatGptProjectUrl(value: unknown): string {
+  if (typeof value !== "string") return "";
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== "https:" || url.hostname !== "chatgpt.com") return "";
+    const segments = url.pathname.split("/").filter(Boolean);
+    const projectIdIndex = segments.findIndex((segment) => /^g-p-[A-Za-z0-9_-]+$/.test(segment));
+    if (projectIdIndex >= 0) {
+      url.pathname = `/${[...segments.slice(0, projectIdIndex + 1), "project"].join("/")}`;
+    } else {
+      const projectIndex = segments.findIndex((segment) => segment === "project" || segment === "projects");
+      if (projectIndex < 0 || !segments[projectIndex + 1]) return "";
+      url.pathname = `/${segments.slice(0, projectIndex + 2).join("/")}`;
+    }
+    url.search = "";
+    url.hash = "";
+    const normalized = url.toString();
+    return normalized.length <= 2048 ? normalized : "";
+  } catch {
+    return "";
+  }
+}
+
+function sanitizeChatGptProjectUrl(value: unknown): string {
+  const normalized = safeChatGptProjectUrl(value);
+  if (!normalized) throw new Error("ChatGPT repository project URL is invalid.");
+  return normalized;
+}
+
+function sanitizePrConversationBindings(value: unknown): RepositoryRecord["chatgptPrConversations"] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<number>();
+  const result: RepositoryRecord["chatgptPrConversations"] = [];
+  for (const item of value) {
+    if (!isRecord(item) || !Number.isSafeInteger(item.prNumber) || Number(item.prNumber) <= 0) continue;
+    const prNumber = Number(item.prNumber);
+    if (seen.has(prNumber)) continue;
+    const conversationUrl = safeChatGptConversationUrl(item.conversationUrl);
+    if (!conversationUrl) continue;
+    seen.add(prNumber);
+    result.push({
+      prNumber,
+      conversationUrl,
+      updatedAt: typeof item.updatedAt === "string" && item.updatedAt.length <= 128 ? item.updatedAt : new Date().toISOString(),
+    });
+    if (result.length >= 500) break;
+  }
+  return result;
+}
+
+function sanitizePrNumber(value: unknown): number {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number <= 0) throw new Error("Pull request number is invalid.");
+  return number;
 }
 
 function sanitizeCloudflareHostname(value: unknown): string {

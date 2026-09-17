@@ -302,6 +302,13 @@ function registerIpc(): void {
     return review;
   });
 
+  ipcMain.handle("review:cancel", async (event, input: unknown) => {
+    assertSender(event.sender.id);
+    if (!isRecord(input) || typeof input.reviewId !== "string" || !input.reviewId.trim()) throw new Error("Review id is invalid.");
+    await requireEngine().cancelReview(input.reviewId);
+    return getAppView();
+  });
+
   ipcMain.handle("spec:attach", async (event) => {
     assertSender(event.sender.id);
     const options: OpenDialogOptions = {
@@ -338,7 +345,7 @@ function registerIpc(): void {
     const review = requireState().getReview(input.reviewId);
     if (!review) throw new Error("Review was not found.");
     const repository = requireState().getRepository(review.repository);
-    await requireChatGpt().showConversation(repository?.chatgptConversationUrl ?? review.conversationUrl);
+    await requireChatGpt().showConversation(review.conversationUrl ?? repository?.chatgptProjectUrl);
     return true;
   });
 

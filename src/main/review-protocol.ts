@@ -61,10 +61,22 @@ export function buildJiraResolutionPrompt(input: { taskId: string; pr: PullReque
     `Never infer Jira description, acceptance criteria, status, or summary from the PR text. If the connector is unavailable, permission is missing, or an issue cannot be fetched, report that explicitly. ` +
     `When multiple keys exist, choose PRIMARY_KEY by strongest direct relevance to the PR title first, then PR description; keep all successfully fetched issues in issues[].\n\n` +
     `TASK_ID: ${input.taskId}\nCANDIDATE_KEYS: ${keys}\nPR_TITLE: ${singleLine(input.pr.title)}\nPR_DESCRIPTION:\n${truncate(input.pr.body, 20_000)}\n\n` +
-    `Return exactly one block and no prose outside it:\n` +
+    `Return exactly one block and no prose outside it. The JSON must be syntactically valid JSON: use double-quoted keys/strings, escape quotes/backslashes/newlines inside strings, do not use markdown fences, and always close every string/object/array. ` +
+    `Keep the payload compact: summarize long Jira descriptions while preserving concrete requirements and acceptance criteria; keep the complete JSON under 20,000 characters.\n` +
     `[JIRA_CONTEXT]\nTASK_ID: ${input.taskId}\nPRIMARY_KEY: <KEY or NONE>\nSTATUS: <RESOLVED|NOT_FOUND|UNAVAILABLE|NO_KEY>\nJSON:\n` +
     `{"issues":[{"key":"PROJ-123","summary":"...","description":"...","acceptanceCriteria":"...","status":"..."}],"notes":"..."}\n[/JIRA_CONTEXT]\n\n` +
     `If CANDIDATE_KEYS is NONE, do not search Jira; return STATUS: NO_KEY with an empty issues array.`;
+}
+
+export function buildJiraRepairPrompt(input: { taskId: string; keys: string[]; parseError: string; attempt: number; maxAttempts: number }): string {
+  return `The Jira evidence from your immediately previous response could not be parsed by the review runner. ` +
+    `Do not change tasks and do not infer anything from the PR. Reformat the Jira facts you already fetched into a fresh, compact, syntactically valid block. ` +
+    `If needed, re-read the exact Jira issue(s) with the Atlassian connector. Use only these candidate keys: ${input.keys.join(", ")}.\n\n` +
+    `TASK_ID: ${input.taskId}\nFORMAT_RETRY: ${input.attempt}/${input.maxAttempts}\nPARSER_ERROR: ${singleLine(input.parseError)}\n\n` +
+    `Return exactly one block and nothing else. Do not use markdown code fences. JSON strings must escape embedded quotes, backslashes, carriage returns, and newlines. ` +
+    `Keep the JSON under 16,000 characters by summarizing long description text without dropping concrete acceptance criteria.\n` +
+    `[JIRA_CONTEXT]\nTASK_ID: ${input.taskId}\nPRIMARY_KEY: <one candidate key or NONE>\nSTATUS: <RESOLVED|NOT_FOUND|UNAVAILABLE|NO_KEY>\nJSON:\n` +
+    `{"issues":[{"key":"PROJ-123","summary":"...","description":"...","acceptanceCriteria":"...","status":"..."}],"notes":"..."}\n[/JIRA_CONTEXT]`;
 }
 
 export function parseJiraResolution(raw: string, taskId: string): JiraResolution {
@@ -73,7 +85,7 @@ export function parseJiraResolution(raw: string, taskId: string): JiraResolution
   if (header(block, "TASK_ID") !== taskId) throw new Error("Jira context belongs to a different review task.");
   const statusHeader = header(block, "STATUS").toUpperCase();
   const primary = header(block, "PRIMARY_KEY").toUpperCase();
-  const jsonText = block.match(/^JSON:\s*\n([\s\S]*?)(?:\n\[\/JIRA_CONTEXT\]|$)/mi)?.[1]?.trim() ?? "";
+  const jsonText = structuredJsonPayload(block, "JIRA_CONTEXT");
   const payload = parseJsonObject(jsonText, "Jira context JSON");
   const issuesValue = Array.isArray(payload.issues) ? payload.issues : [];
   const issues = issuesValue.map((item) => {
@@ -154,7 +166,7 @@ export function parseChunkReview(raw: string, taskId: string, chunkIndex: number
   if (!block) throw new Error(`ChatGPT did not return a [CHUNK_REVIEW] block for chunk ${chunkIndex}.`);
   if (header(block, "TASK_ID") !== taskId) throw new Error("Chunk review belongs to a different review task.");
   if (Number.parseInt(header(block, "CHUNK"), 10) !== chunkIndex) throw new Error("Chunk review index does not match the active chunk.");
-  const jsonText = block.match(/^JSON:\s*\n([\s\S]*?)(?:\n\[\/CHUNK_REVIEW\]|$)/mi)?.[1]?.trim() ?? "";
+  const jsonText = structuredJsonPayload(block, "CHUNK_REVIEW");
   const payload = parseJsonObject(jsonText, "chunk review JSON");
   return {
     summary: typeof payload.summary === "string" ? payload.summary.slice(0, 10_000) : "",
@@ -206,7 +218,7 @@ export function parseFinalReview(raw: string, taskId: string): ParsedReviewResul
   const block = markerBlock(raw, "PR_REVIEW");
   if (!block) throw new Error("ChatGPT did not return a [PR_REVIEW] block.");
   if (header(block, "TASK_ID") !== taskId) throw new Error("Final review belongs to a different review task.");
-  const jsonText = block.match(/^JSON:\s*\n([\s\S]*?)(?:\n\[\/PR_REVIEW\]|$)/mi)?.[1]?.trim() ?? "";
+  const jsonText = structuredJsonPayload(block, "PR_REVIEW");
   const payload = parseJsonObject(jsonText, "final review JSON");
   const verdict = String(payload.verdict ?? "").toUpperCase();
   if (verdict !== "PASS" && verdict !== "CHANGES_REQUESTED" && verdict !== "BLOCKED") throw new Error("Final review verdict is invalid.");
@@ -397,14 +409,86 @@ function header(block: string, name: string): string {
   return block.match(new RegExp(`^${name}:\\s*(.*?)\\s*$`, "mi"))?.[1]?.trim() ?? "";
 }
 
+function structuredJsonPayload(block: string, markerName: string): string {
+  const pattern = new RegExp(`(?:^|\\n)JSON:\\s*\\r?\\n([\\s\\S]*?)\\r?\\n\\[\\/${markerName}\\]`, "i");
+  return block.match(pattern)?.[1]?.trim() ?? "";
+}
+
 function parseJsonObject(value: string, label: string): Record<string, any> {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (!isRecord(parsed)) throw new Error(`${label} is not an object.`);
-    return parsed;
-  } catch (error) {
-    throw new Error(`${label} is invalid: ${error instanceof Error ? error.message : "unknown parse error"}`);
+  const normalized = normalizeJsonCandidate(value);
+  const attempts = [normalized, escapeStringControlCharacters(normalized)];
+  let lastError: unknown;
+  for (const attempt of [...new Set(attempts)]) {
+    try {
+      const parsed = JSON.parse(attempt) as unknown;
+      if (!isRecord(parsed)) throw new Error(`${label} is not an object.`);
+      return parsed;
+    } catch (error) {
+      lastError = error;
+    }
   }
+  throw new Error(`${label} is invalid: ${lastError instanceof Error ? lastError.message : "unknown parse error"}`);
+}
+
+function normalizeJsonCandidate(value: string): string {
+  let normalized = value.trim();
+  const fenced = normalized.match(/^```(?:json)?\s*\n([\s\S]*?)\n```$/i)?.[1];
+  if (fenced) normalized = fenced.trim();
+  const firstObject = normalized.indexOf("{");
+  const lastObject = normalized.lastIndexOf("}");
+  if (firstObject >= 0 && lastObject > firstObject) normalized = normalized.slice(firstObject, lastObject + 1);
+  return normalized;
+}
+
+function escapeStringControlCharacters(value: string): string {
+  let output = "";
+  let inString = false;
+  let escaped = false;
+  for (const char of value) {
+    if (!inString) {
+      output += char;
+      if (char === '"') inString = true;
+      continue;
+    }
+
+    if (escaped) {
+      if (/^[\\/"bfnrtu]$/.test(char)) {
+        output += char;
+      } else {
+        // ChatGPT/Jira often returns file paths or markdown fragments with raw
+        // backslashes inside JSON strings, for example "src\modules" or
+        // "\_escaped". JSON only allows a small escape alphabet, so preserve
+        // the literal backslash by escaping it before the following character.
+        output += `\\${char}`;
+      }
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      output += char;
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      output += char;
+      inString = false;
+      continue;
+    }
+    if (char === "\n") {
+      output += "\\n";
+      continue;
+    }
+    if (char === "\r") {
+      output += "\\r";
+      continue;
+    }
+    if (char === "\t") {
+      output += "\\t";
+      continue;
+    }
+    output += char;
+  }
+  return output;
 }
 
 function text(value: unknown, max: number): string {

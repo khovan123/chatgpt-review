@@ -5,6 +5,7 @@ import { GitHubProvider } from "./github-provider";
 import {
   buildChunkReviewPrompt,
   buildFinalReviewPrompt,
+  buildJiraRepairPrompt,
   buildJiraResolutionPrompt,
   extractJiraKeys,
   parseChunkReview,
@@ -25,6 +26,9 @@ import type {
 } from "./types";
 import { shouldTriggerPullRequestReview, type GitHubWebhookEvent } from "./webhook-server";
 
+const JIRA_FORMAT_RETRIES = 2;
+const MAX_CONCURRENT_REVIEWS = 3;
+
 export interface ReviewEngineEvent {
   type: "state" | "progress";
   reviewId?: string;
@@ -42,7 +46,10 @@ export class ReviewEngine {
   private providerStatus = { ghInstalled: false, ghAuthenticated: false, detail: "Not checked." };
   private running = new Set<string>();
   private scheduled = new Set<string>();
-  private queue: Promise<unknown> = Promise.resolve();
+  private activeReviewCount = 0;
+  private reviewSlotWaiters: Array<() => void> = [];
+  private repositoryProjectPromises = new Map<string, Promise<string>>();
+  private cancelledTasks = new Set<string>();
 
   constructor(private readonly dependencies: {
     state: StateStore;
@@ -90,11 +97,6 @@ export class ReviewEngine {
     const validated = await this.dependencies.github.validateRepository(repository);
     const existing = this.dependencies.state.getRepository(validated.fullName);
     const record = existing ?? makeRepository(validated.fullName);
-    if (!record.chatgptConversationUrl) {
-      const priorConversation = this.dependencies.state.listReviews()
-        .find((review) => review.repository.toLowerCase() === validated.fullName.toLowerCase() && review.conversationUrl)?.conversationUrl;
-      if (priorConversation) record.chatgptConversationUrl = priorConversation;
-    }
     record.enabled = true;
     await this.dependencies.state.upsertRepository(record);
 
@@ -109,10 +111,13 @@ export class ReviewEngine {
       this.emit({ type: "state", repository: validated.fullName, message: `Repository linked, but webhook setup failed: ${safeError(error)}` });
     }
 
+    await this.ensureRepositoryProject(validated.fullName).catch((error) => {
+      this.emit({ type: "progress", repository: validated.fullName, message: `Repository linked; ChatGPT Project setup is pending: ${safeError(error)}` });
+    });
     await this.refreshPullRequests(validated.fullName).catch((error) => {
       this.emit({ type: "progress", repository: validated.fullName, message: `Repository linked but PR refresh failed: ${safeError(error)}` });
     });
-    return configured;
+    return this.dependencies.state.getRepository(validated.fullName) ?? configured;
   }
 
   async unlinkRepository(repository: string): Promise<void> {
@@ -201,12 +206,50 @@ export class ReviewEngine {
       return Promise.reject(new Error(`${linked.fullName} PR #${prNumber} is already queued or being reviewed.`));
     }
     this.scheduled.add(key);
-    const execution = this.queue.then(() => {
+    const execution = (async () => {
+      while (this.running.has(key)) await new Promise((resolve) => setTimeout(resolve, 250));
+      await this.acquireReviewSlot();
       this.scheduled.delete(key);
-      return this.reviewNow(linked.fullName, prNumber, force, trigger);
+      try {
+        return await this.reviewNow(linked.fullName, prNumber, force, trigger);
+      } finally {
+        this.releaseReviewSlot();
+      }
+    })();
+    void execution.catch(() => {
+      this.scheduled.delete(key);
     });
-    this.queue = execution.catch(() => undefined);
     return execution;
+  }
+
+  async cancelReview(reviewId: string): Promise<ReviewRecord> {
+    const review = this.dependencies.state.getReview(reviewId);
+    if (!review) throw new Error("Review was not found.");
+    if (review.status === "completed" || review.status === "blocked" || review.status === "failed" || review.status === "cancelled") return review;
+
+    this.cancelledTasks.add(review.taskId);
+    // Destroying the task window immediately interrupts any in-flight ChatGPT
+    // DOM wait/send loop. Non-ChatGPT work checks cancelledTasks at phase
+    // boundaries and exits before the next expensive stage.
+    this.dependencies.chatgpt.finishTask(review.taskId);
+
+    const now = new Date().toISOString();
+    review.status = "cancelled";
+    review.phase = "cancelled";
+    review.error = "Review cancelled by user.";
+    review.updatedAt = now;
+    review.completedAt = now;
+    await this.dependencies.state.upsertReview(review);
+    this.emit({
+      type: "state",
+      reviewId: review.id,
+      taskId: review.taskId,
+      repository: review.repository,
+      prNumber: review.prNumber,
+      phase: "cancelled",
+      message: review.error,
+    });
+    return review;
   }
 
   async handleWebhookEvent(event: GitHubWebhookEvent): Promise<void> {
@@ -303,22 +346,84 @@ export class ReviewEngine {
       await this.setPhase(record, "collecting-pr", `Collected ${repository} PR #${pr.number} at exact head ${pr.headSha.slice(0, 12)}.`);
 
       const diff = await this.dependencies.github.getPullRequestDiff(repository, pr.number);
+      this.assertNotCancelled(record);
       if (!diff.trim()) throw new Error("Pull request diff is empty.");
       const diffChunks = splitDiff(diff, config.maxDiffChunkBytes);
       if (!diffChunks.length) throw new Error("Pull request diff could not be chunked for review.");
 
-      const repositoryRecord = this.dependencies.state.getRepository(repository);
-      await this.dependencies.chatgpt.startTask(taskId, repositoryRecord?.chatgptConversationUrl);
-      const bindConversation = (conversationUrl: string) => this.bindRepositoryConversation(record!, conversationUrl);
+      const projectUrl = await this.ensureRepositoryProject(repository);
+      this.assertNotCancelled(record);
+      const storedConversationUrl = this.dependencies.state.getPullRequestChatConversation(repository, pr.number);
+      const taskStart = await this.dependencies.chatgpt.startTask(taskId, projectUrl, storedConversationUrl);
+      let staleConversationUrl: string | undefined;
+      if (storedConversationUrl && taskStart.fallbackToNewConversation) {
+        // One PR owns one canonical conversation inside the repository Project.
+        // If that chat vanished, the first new conversation created by this task
+        // replaces only this PR's stale binding.
+        staleConversationUrl = storedConversationUrl;
+        this.emit({
+          type: "progress",
+          reviewId: record.id,
+          taskId: record.taskId,
+          repository: record.repository,
+          prNumber: record.prNumber,
+          phase: record.phase,
+          message: `Stored ChatGPT conversation for ${record.repository} PR #${record.prNumber} is unavailable; creating a new conversation inside the repository Project.`,
+        });
+      } else if (taskStart.conversationUrl) {
+        await this.bindPullRequestConversation(record, taskStart.conversationUrl);
+      }
+      const bindConversation = async (conversationUrl: string) => {
+        if (staleConversationUrl) {
+          const expected = staleConversationUrl;
+          staleConversationUrl = undefined;
+          await this.rebindStalePullRequestConversation(record!, expected, conversationUrl);
+          return;
+        }
+        await this.bindPullRequestConversation(record!, conversationUrl);
+      };
       let jira: JiraResolution;
       if (record.jiraKeys.length === 0) {
         jira = { primaryKey: null, status: "no-key", issues: [], notes: "No Jira key was found in PR title or description.", raw: "" };
       } else {
         await this.setPhase(record, "resolving-jira", `Resolving Jira keys: ${record.jiraKeys.join(", ")}`);
-        const resolved = await this.dependencies.chatgpt.send(taskId, buildJiraResolutionPrompt({ taskId, pr, keys: record.jiraKeys }), bindConversation);
-        await this.bindRepositoryConversation(record, resolved.conversationUrl);
-        jira = parseJiraResolution(resolved.text, taskId);
+        let response = await this.dependencies.chatgpt.send(taskId, buildJiraResolutionPrompt({ taskId, pr, keys: record.jiraKeys }), bindConversation);
+        this.assertNotCancelled(record);
+        await bindConversation(response.conversationUrl);
+        let parsedJira: JiraResolution | undefined;
+        let parseError: unknown;
+        for (let attempt = 0; attempt <= JIRA_FORMAT_RETRIES; attempt += 1) {
+          try {
+            parsedJira = parseJiraResolution(response.text, taskId);
+            break;
+          } catch (error) {
+            parseError = error;
+            if (attempt >= JIRA_FORMAT_RETRIES || !isRetryableJiraFormatError(error)) break;
+            const retryNumber = attempt + 1;
+            this.emit({
+              type: "progress",
+              reviewId: record.id,
+              taskId: record.taskId,
+              repository: record.repository,
+              prNumber: record.prNumber,
+              phase: record.phase,
+              message: `Jira context format was invalid; asking ChatGPT to reformat it (${retryNumber}/${JIRA_FORMAT_RETRIES}).`,
+            });
+            response = await this.dependencies.chatgpt.send(taskId, buildJiraRepairPrompt({
+              taskId,
+              keys: record.jiraKeys,
+              parseError: safeError(error),
+              attempt: retryNumber,
+              maxAttempts: JIRA_FORMAT_RETRIES,
+            }), bindConversation);
+            this.assertNotCancelled(record);
+            await bindConversation(response.conversationUrl);
+          }
+        }
+        if (!parsedJira) throw parseError instanceof Error ? parseError : new Error("Jira context could not be parsed.");
+        jira = parsedJira;
       }
+      this.assertNotCancelled(record);
       record.jira = jira;
       record.updatedAt = new Date().toISOString();
       await this.dependencies.state.upsertReview(record);
@@ -358,26 +463,32 @@ export class ReviewEngine {
           chunk,
           totalChunks: diffChunks.length,
         }), bindConversation);
-        await this.bindRepositoryConversation(record, response.conversationUrl);
+        this.assertNotCancelled(record);
+        await bindConversation(response.conversationUrl);
         chunkReviews.push(parseChunkReview(response.text, taskId, chunk.index));
+        this.assertNotCancelled(record);
         record.updatedAt = new Date().toISOString();
         await this.dependencies.state.upsertReview(record);
       }
 
       await this.setPhase(record, "synthesizing", `Synthesizing ${chunkReviews.length} bounded review result(s).`);
       const finalResponse = await this.dependencies.chatgpt.send(taskId, buildFinalReviewPrompt({ taskId, pr, jira, spec: topSpec, chunks: chunkReviews }), bindConversation);
-      await this.bindRepositoryConversation(record, finalResponse.conversationUrl);
+      this.assertNotCancelled(record);
+      await bindConversation(finalResponse.conversationUrl);
       record.rawReview = finalResponse.text;
       record.result = parseFinalReview(finalResponse.text, taskId);
+      this.assertNotCancelled(record);
 
       if (record.result.verdict === "BLOCKED") return this.block(record, record.result.summary || "ChatGPT marked the review blocked by missing evidence.");
 
       if (config.postComment) {
         await this.setPhase(record, "posting-comment", "Posting the completed review to GitHub.");
         await this.dependencies.github.postComment(repository, pr.number, reviewMarkdown(record.result, pr.headSha));
+        this.assertNotCancelled(record);
         record.commentPosted = true;
       }
 
+      this.assertNotCancelled(record);
       record.status = "completed";
       record.phase = "completed";
       record.completedAt = new Date().toISOString();
@@ -389,6 +500,19 @@ export class ReviewEngine {
       this.emit({ type: "state", reviewId: record.id, taskId, repository, prNumber, phase: "completed", message: `${repository} PR #${pr.number} review completed: ${record.result.verdict}.${commentMessage}` });
       return record;
     } catch (error) {
+      if (record && (this.cancelledTasks.has(record.taskId) || this.dependencies.state.getReview(record.id)?.status === "cancelled")) {
+        const persisted = this.dependencies.state.getReview(record.id);
+        if (persisted?.status === "cancelled") return persisted;
+        const now = new Date().toISOString();
+        record.status = "cancelled";
+        record.phase = "cancelled";
+        record.error = "Review cancelled by user.";
+        record.updatedAt = now;
+        record.completedAt = now;
+        await this.dependencies.state.upsertReview(record).catch(() => undefined);
+        this.emit({ type: "state", reviewId: record.id, taskId: record.taskId, repository, prNumber, phase: "cancelled", message: record.error });
+        return record;
+      }
       if (record) {
         record.status = "failed";
         record.phase = "failed";
@@ -400,7 +524,10 @@ export class ReviewEngine {
       }
       throw error;
     } finally {
-      if (record) this.dependencies.chatgpt.finishTask(record.taskId);
+      if (record) {
+        this.dependencies.chatgpt.finishTask(record.taskId);
+        this.cancelledTasks.delete(record.taskId);
+      }
       this.running.delete(key);
     }
   }
@@ -412,29 +539,118 @@ export class ReviewEngine {
     ];
   }
 
-  private async bindRepositoryConversation(record: ReviewRecord, conversationUrl: string): Promise<void> {
-    const repository = this.dependencies.state.getRepository(record.repository);
-    if (!repository) throw new Error(`Repository ${record.repository} is not linked.`);
+  private async ensureRepositoryProject(repository: string): Promise<string> {
+    const key = repository.toLowerCase();
+    const existingPromise = this.repositoryProjectPromises.get(key);
+    if (existingPromise) return existingPromise;
 
-    if (repository.chatgptConversationUrl && repository.chatgptConversationUrl !== conversationUrl) {
-      throw new Error(`ChatGPT conversation changed unexpectedly for ${record.repository}. Reviews for one repository must stay in one conversation.`);
+    const execution = (async () => {
+      const current = this.dependencies.state.getRepository(repository);
+      if (!current) throw new Error(`Repository ${repository} is not linked.`);
+      const binding = await this.dependencies.chatgpt.ensureProject(current.fullName, current.chatgptProjectUrl);
+      let updated = current;
+      if (!current.chatgptProjectUrl) {
+        updated = await this.dependencies.state.updateRepositoryChatProject(current.fullName, binding.projectUrl);
+        this.emit({ type: "progress", repository: current.fullName, message: `Created and bound ChatGPT Project for ${current.fullName}.` });
+      } else if (current.chatgptProjectUrl !== binding.projectUrl) {
+        updated = await this.dependencies.state.replaceRepositoryChatProject(current.fullName, current.chatgptProjectUrl, binding.projectUrl);
+        this.emit({ type: "progress", repository: current.fullName, message: `Recreated the missing ChatGPT Project for ${current.fullName}; stale PR conversation bindings were cleared.` });
+      }
+      if (!updated.chatgptProjectUrl) throw new Error(`Could not bind a ChatGPT Project to ${current.fullName}.`);
+      return updated.chatgptProjectUrl;
+    })();
+
+    this.repositoryProjectPromises.set(key, execution);
+    try {
+      return await execution;
+    } finally {
+      if (this.repositoryProjectPromises.get(key) === execution) this.repositoryProjectPromises.delete(key);
+    }
+  }
+
+  private async bindPullRequestConversation(record: ReviewRecord, conversationUrl: string): Promise<void> {
+    const current = this.dependencies.state.getPullRequestChatConversation(record.repository, record.prNumber);
+    if (current && current !== conversationUrl) {
+      throw new Error(`ChatGPT conversation changed unexpectedly for ${record.repository} PR #${record.prNumber}. Each PR must stay in one conversation.`);
     }
 
-    const canonical = repository.chatgptConversationUrl
-      ?? (await this.dependencies.state.updateRepositoryChatConversation(record.repository, conversationUrl)).chatgptConversationUrl;
-    if (!canonical) throw new Error(`Could not bind a ChatGPT conversation to ${record.repository}.`);
+    const created = !current;
+    const updated = current
+      ? this.dependencies.state.getRepository(record.repository)
+      : await this.dependencies.state.updatePullRequestChatConversation(record.repository, record.prNumber, conversationUrl);
+    const canonical = updated?.chatgptPrConversations.find((binding) => binding.prNumber === record.prNumber)?.conversationUrl ?? current;
+    if (!canonical) throw new Error(`Could not bind a ChatGPT conversation to ${record.repository} PR #${record.prNumber}.`);
     record.conversationUrl = canonical;
+    if (created) {
+      this.emit({
+        type: "progress",
+        reviewId: record.id,
+        taskId: record.taskId,
+        repository: record.repository,
+        prNumber: record.prNumber,
+        phase: record.phase,
+        message: `Created and bound ChatGPT conversation for ${record.repository} PR #${record.prNumber} inside its repository Project.`,
+      });
+    }
+  }
+
+  private async rebindStalePullRequestConversation(
+    record: ReviewRecord,
+    expectedConversationUrl: string,
+    conversationUrl: string,
+  ): Promise<void> {
+    const updated = await this.dependencies.state.replacePullRequestChatConversation(
+      record.repository,
+      record.prNumber,
+      expectedConversationUrl,
+      conversationUrl,
+    );
+    const canonical = updated.chatgptPrConversations.find((binding) => binding.prNumber === record.prNumber)?.conversationUrl;
+    if (!canonical) throw new Error(`Could not recover the ChatGPT conversation for ${record.repository} PR #${record.prNumber}.`);
+    record.conversationUrl = canonical;
+    this.emit({
+      type: "progress",
+      reviewId: record.id,
+      taskId: record.taskId,
+      repository: record.repository,
+      prNumber: record.prNumber,
+      phase: record.phase,
+      message: `Created and bound a new ChatGPT conversation for ${record.repository} PR #${record.prNumber} inside its repository Project.`,
+    });
+  }
+
+  private async acquireReviewSlot(): Promise<void> {
+    if (this.activeReviewCount < MAX_CONCURRENT_REVIEWS) {
+      this.activeReviewCount += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => this.reviewSlotWaiters.push(resolve));
+    this.activeReviewCount += 1;
+  }
+
+  private releaseReviewSlot(): void {
+    this.activeReviewCount = Math.max(0, this.activeReviewCount - 1);
+    const next = this.reviewSlotWaiters.shift();
+    next?.();
   }
 
   private async setPhase(record: ReviewRecord, phase: ReviewPhase, message: string): Promise<void> {
-    record.status = phase === "blocked" ? "blocked" : phase === "failed" ? "failed" : phase === "completed" ? "completed" : "running";
+    this.assertNotCancelled(record);
+    record.status = phase === "blocked" ? "blocked" : phase === "failed" ? "failed" : phase === "cancelled" ? "cancelled" : phase === "completed" ? "completed" : "running";
     record.phase = phase;
     record.updatedAt = new Date().toISOString();
     await this.dependencies.state.upsertReview(record);
     this.emit({ type: "state", reviewId: record.id, taskId: record.taskId, repository: record.repository, prNumber: record.prNumber, phase, message });
   }
 
+  private assertNotCancelled(record: ReviewRecord): void {
+    if (this.cancelledTasks.has(record.taskId) || this.dependencies.state.getReview(record.id)?.status === "cancelled") {
+      throw new Error("Review cancelled by user.");
+    }
+  }
+
   private async block(record: ReviewRecord, reason: string): Promise<ReviewRecord> {
+    this.assertNotCancelled(record);
     record.status = "blocked";
     record.phase = "blocked";
     record.error = reason;
@@ -448,6 +664,13 @@ export class ReviewEngine {
   private emit(event: ReviewEngineEvent): void {
     this.dependencies.onEvent?.(event);
   }
+}
+
+function isRetryableJiraFormatError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message === "ChatGPT did not return a [JIRA_CONTEXT] block."
+    || error.message.startsWith("Jira context JSON is invalid:")
+    || error.message === "Jira issue context is invalid.";
 }
 
 function safeError(error: unknown): string {

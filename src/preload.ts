@@ -14,6 +14,7 @@ const api = {
   syncRepositoryWebhook: (repository: string) => ipcRenderer.invoke("repo:sync-webhook", { repository }),
   refreshPullRequests: (repository?: string) => ipcRenderer.invoke("pr:refresh", repository ? { repository } : {}),
   runReview: (repository: string, prNumber: number, force = false) => ipcRenderer.invoke("review:run", { repository, prNumber, force }),
+  cancelReview: (reviewId: string) => ipcRenderer.invoke("review:cancel", { reviewId }),
   attachSpecs: () => ipcRenderer.invoke("spec:attach"),
   removeSpec: (id: string) => ipcRenderer.invoke("spec:remove", { id }),
   openChatGptSetup: () => ipcRenderer.invoke("chatgpt:setup"),
