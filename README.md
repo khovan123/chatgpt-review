@@ -13,6 +13,8 @@ GitHub pull_request webhook
   -> delivery idempotency check
   -> linked repository lookup
   -> re-read exact PR + current head SHA through gh
+  -> repository-scoped ChatGPT Project
+  -> PR-scoped canonical ChatGPT conversation
   -> Jira key mapping from PR title/description
   -> Jira evidence through ChatGPT Atlassian connector
   -> relevant spec-memory retrieval
@@ -85,9 +87,20 @@ http://127.0.0.1:8787
 - unknown/unlinked repositories are rejected;
 - exact current GitHub head SHA is re-read before automatic review.
 
-## ChatGPT Web lane
+## ChatGPT Web isolation and review lanes
 
-No OpenAI API/model API is used. The ChatGPT browser window uses a dedicated persistent Electron partition with `nodeIntegration: false`, `contextIsolation: true`, Chromium sandboxing, no preload bridge exposed to `chatgpt.com`, restricted navigation, task-bound structured responses, bounded prompts/responses, and secret redaction before diff content is sent.
+No OpenAI API/model API is used. ChatGPT Web runs in a dedicated persistent Electron partition with `nodeIntegration: false`, `contextIsolation: true`, Chromium sandboxing, no preload bridge exposed to `chatgpt.com`, restricted navigation, task-bound structured responses, bounded prompts/responses, and secret redaction before diff content is sent.
+
+The review context is isolated with these invariants:
+
+- **1 linked repository = 1 ChatGPT Project**, named `PR Review - owner - repo`;
+- new app-managed Projects are created with the current ChatGPT default memory setting; the app only manages the repository-to-Project binding and does not change the user's Project memory setting;
+- **1 PR number = 1 canonical ChatGPT conversation** inside that repository Project; all later reviews of the same PR reuse that conversation;
+- if a PR conversation no longer exists, the next review creates a replacement conversation inside the same repository Project and updates only that PR binding;
+- if the repository Project no longer exists, the app recreates it, clears the stale PR-chat bindings, and lets each PR establish a new conversation inside the replacement Project;
+- legacy pre-Project repository-wide conversation state is intentionally not promoted into the new model, preventing an old shared chat from contaminating multiple PRs.
+
+Different PRs may review concurrently. Each active review gets its own hidden Electron `BrowserWindow` while all windows share the signed-in persistent ChatGPT session. Concurrency is bounded to **3 active reviews** to protect the VPS/browser session. The same PR is still serialized/coalesced so two review turns cannot race inside its canonical conversation. Project creation/recovery for the same repository is also serialized to prevent duplicate Projects.
 
 ## Jira mapping
 
@@ -134,10 +147,11 @@ Then:
 2. In **Settings → Connections**, paste it once and select **Discover zones**. Choose a zone and optionally a hostname label, then select **Create tunnel + DNS + ingress**.
 3. The app creates the named tunnel, ingress and DNS in that user's account, obtains/stores only the runtime tunnel token, discards the provisioning API token, starts `cloudflared`, and verifies the public route.
 4. Open ChatGPT Web, sign in, and enable the Atlassian/Jira connector.
-5. In **Settings → Repositories**, link one or more GitHub repositories. Their webhooks are created automatically against the verified personal endpoint.
+5. In **Settings → Repositories**, link one or more GitHub repositories. Their webhooks are created automatically against the verified personal endpoint, and the app creates/binds one ChatGPT Project for each repository.
 6. Attach specification memory if needed.
-7. GitHub PR events trigger reviews directly through the signed webhook path.
-8. Optionally enable posting completed reviews back to GitHub.
+7. The first review of each PR creates its own canonical conversation inside that repository Project; later reviews of that PR reuse it.
+8. GitHub PR events trigger reviews directly through the signed webhook path, with up to three different PR reviews active concurrently.
+9. Optionally enable posting completed reviews back to GitHub.
 
 ## Review state machine
 

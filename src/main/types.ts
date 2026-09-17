@@ -1,5 +1,5 @@
-export type ReviewStatus = "queued" | "running" | "completed" | "blocked" | "failed";
-export type ReviewPhase = "queued" | "collecting-pr" | "resolving-jira" | "retrieving-spec" | "reviewing-diff" | "synthesizing" | "posting-comment" | "completed" | "blocked" | "failed";
+export type ReviewStatus = "queued" | "running" | "completed" | "blocked" | "failed" | "cancelled";
+export type ReviewPhase = "queued" | "collecting-pr" | "resolving-jira" | "retrieving-spec" | "reviewing-diff" | "synthesizing" | "posting-comment" | "completed" | "blocked" | "failed" | "cancelled";
 export type RepositoryWebhookStatus = "pending" | "healthy" | "error" | "disabled";
 
 export interface ReviewConfig {
@@ -52,12 +52,19 @@ export interface CloudflareProvisioningRecord {
   provisionedAt: string;
 }
 
+export interface ChatGptPrConversationBinding {
+  prNumber: number;
+  conversationUrl: string;
+  updatedAt: string;
+}
+
 export interface RepositoryRecord {
   id: string;
   fullName: string;
   addedAt: string;
   enabled: boolean;
-  chatgptConversationUrl?: string;
+  chatgptProjectUrl?: string;
+  chatgptPrConversations: ChatGptPrConversationBinding[];
   webhook: {
     hookId: number | null;
     targetUrl: string;
@@ -192,7 +199,7 @@ export interface WebhookDeliveryRecord {
 }
 
 export interface PersistedState {
-  version: 3;
+  version: 4;
   config: ReviewConfig;
   cloudflareProvisioning: CloudflareProvisioningRecord | null;
   repositories: RepositoryRecord[];

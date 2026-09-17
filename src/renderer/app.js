@@ -192,6 +192,14 @@ function renderPrs() {
   }
 }
 
+function isActiveReview(review) {
+  return review?.status === "running" || review?.status === "queued";
+}
+
+function isTerminalReview(review) {
+  return review?.status === "completed" || review?.status === "blocked" || review?.status === "failed" || review?.status === "cancelled";
+}
+
 function renderReviewDetail() {
   const pr = currentPullRequest();
   if (!pr) {
@@ -209,7 +217,7 @@ function renderReviewDetail() {
 
   const latest = latestReview(pr.repository, pr.number);
   elements.reviewSelectedPr.textContent = latest?.headSha === pr.headSha ? "Review again" : "Review now";
-  elements.reviewSelectedPr.disabled = latest?.status === "running" || latest?.status === "queued";
+  elements.reviewSelectedPr.disabled = isActiveReview(latest);
   renderReviews(pr);
 }
 
@@ -285,7 +293,13 @@ function renderReviews(pr) {
     }
 
     const actions = el("div", "button-row");
-    const terminal = review.status === "completed" || review.status === "blocked" || review.status === "failed";
+    const active = isActiveReview(review);
+    const terminal = isTerminalReview(review);
+    if (active) {
+      const cancel = button("Cancel review", "button danger small", () => cancelReview(review.id));
+      cancel.disabled = busy.has(`cancel:${review.id}`);
+      actions.append(cancel);
+    }
     if (review.conversationUrl && terminal) actions.append(button("Open Chat", "button secondary small", () => api.openReviewChat(review.id)));
     if (terminal) {
       actions.append(button("Re-review head", "button secondary small", () => runReview(review.repository, review.prNumber, true)));
@@ -440,6 +454,8 @@ function renderSettingsRepositories() {
 
     const details = el("div", "repository-settings-details");
     details.append(
+      detailRow("ChatGPT Project", repository.chatgptProjectUrl ? "Bound · Repository review context" : "Pending creation"),
+      detailRow("PR conversations", String(repository.chatgptPrConversations?.length ?? 0)),
       detailRow("Webhook ID", repository.webhook.hookId ? String(repository.webhook.hookId) : "Not created"),
       detailRow("Target", repository.webhook.targetUrl || view.config.webhookPublicUrl || "Not configured"),
       detailRow("Last event", repository.webhook.lastEvent || "Waiting for delivery"),
@@ -517,6 +533,15 @@ async function runReview(repository, prNumber, force) {
   } finally {
     busy.delete(key);
   }
+}
+
+async function cancelReview(reviewId) {
+  await withBusy(`cancel:${reviewId}`, async () => {
+    view = await api.cancelReview(reviewId);
+    normalizeSelection();
+    render();
+    showNotice("Review cancelled.");
+  });
 }
 
 async function refreshRepository(repository, silent = false) {
@@ -911,6 +936,7 @@ function toneForStatus(status) {
   if (status === "completed") return "success";
   if (status === "failed") return "danger";
   if (status === "blocked") return "warning";
+  if (status === "cancelled") return "muted-badge";
   return "info";
 }
 

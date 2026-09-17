@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   buildChunkReviewPrompt,
   buildFinalReviewPrompt,
+  buildJiraRepairPrompt,
   extractJiraKeys,
   parseFinalReview,
   parseJiraResolution,
+  parseChunkReview,
   redactSecrets,
   splitDiff,
 } from "./review-protocol";
@@ -47,6 +49,42 @@ describe("review protocol", () => {
     expect(result.status).toBe("resolved");
     expect(result.primaryKey).toBe("ABC-42");
     expect(result.issues[0]?.description).toBe("Do it");
+  });
+
+  it("accepts an accidentally fenced Jira JSON payload inside the required marker block", () => {
+    const raw = `[JIRA_CONTEXT]\nTASK_ID: review_0123456789abcdef\nPRIMARY_KEY: ABC-42\nSTATUS: RESOLVED\nJSON:\n\`\`\`json\n{"issues":[{"key":"ABC-42","summary":"Fix checkout","description":"Do it","acceptanceCriteria":"Works","status":"Open"}],"notes":"ok"}\n\`\`\`\n[/JIRA_CONTEXT]`;
+    expect(parseJiraResolution(raw, "review_0123456789abcdef").issues[0]?.key).toBe("ABC-42");
+  });
+
+  it("parses chunk review JSON with raw backslashes inside string fields", () => {
+    const raw = `[CHUNK_REVIEW]\nTASK_ID: review_0123456789abcdef\nCHUNK: 3\nJSON:\n{"summary":"Reviewed src\\modules\\assessment and markdown \\_notes","findings":[{"severity":"P1","file":"apps/api/src/modules/assessment/service.ts","line":12,"title":"Bad path evidence","explanation":"Windows path C:\\temp\\file and escaped markdown \\_marker should parse.","evidence":"diff shows src\\modules\\assessment\\service.ts","jiraRef":"LCSP-324","specRef":"","suggestion":"Fix it"}]}\n[/CHUNK_REVIEW]`;
+    const result = parseChunkReview(raw, "review_0123456789abcdef", 3);
+    expect(result.findings[0]?.evidence).toContain("src\\modules");
+    expect(result.findings[0]?.explanation).toContain("\\_marker");
+  });
+
+  it("repairs common Jira JSON with raw newlines in string fields", () => {
+    const raw = `[JIRA_CONTEXT]\nTASK_ID: review_0123456789abcdef\nPRIMARY_KEY: ABC-42\nSTATUS: RESOLVED\nJSON:\n{"issues":[{"key":"ABC-42","summary":"Fix checkout","description":"Line one
+Line two","acceptanceCriteria":"AC one
+AC two","status":"Open"}],"notes":"ok"}\n[/JIRA_CONTEXT]`;
+    const result = parseJiraResolution(raw, "review_0123456789abcdef");
+    expect(result.issues[0]?.description).toBe("Line one\nLine two");
+    expect(result.issues[0]?.acceptanceCriteria).toBe("AC one\nAC two");
+  });
+
+  it("builds a bounded Jira repair turn that keeps the same task and candidate keys", () => {
+    const prompt = buildJiraRepairPrompt({
+      taskId: "review_0123456789abcdef",
+      keys: ["ABC-42"],
+      parseError: "Jira context JSON is invalid: Unterminated string",
+      attempt: 1,
+      maxAttempts: 2,
+    });
+    expect(prompt).toContain("TASK_ID: review_0123456789abcdef");
+    expect(prompt).toContain("ABC-42");
+    expect(prompt).toContain("FORMAT_RETRY: 1/2");
+    expect(prompt).toContain("syntactically valid");
+    expect(prompt).toContain("under 16,000 characters");
   });
 
   it("parses a final structured review", () => {

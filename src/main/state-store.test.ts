@@ -72,9 +72,9 @@ describe("StateStore Cloudflare provisioning", () => {
 });
 
 
-describe("StateStore repository ChatGPT conversation", () => {
-  it("migrates the latest valid review conversation into one canonical repository conversation", async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), "chatgpt-review-conversation-"));
+describe("StateStore ChatGPT Project and PR conversation bindings", () => {
+  it("migrates legacy state without reusing the old cross-PR repository conversation", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "chatgpt-review-project-migration-"));
     cleanup.push(root);
     const file = path.join(root, "state.json");
     await writeFile(file, JSON.stringify({
@@ -86,34 +86,108 @@ describe("StateStore repository ChatGPT conversation", () => {
         fullName: "owner/repo",
         addedAt: "2026-09-16T08:00:00.000Z",
         enabled: true,
+        chatgptConversationUrl: "https://chatgpt.com/c/legacy-cross-pr-chat",
         webhook: { hookId: null, targetUrl: "", status: "pending" },
       }],
-      reviews: [
-        {
-          id: "new", taskId: "review_1111111111111111", repository: "owner/repo", prNumber: 2,
-          prTitle: "new", prUrl: "https://github.com/owner/repo/pull/2", headSha: "b".repeat(40),
-          status: "completed", phase: "completed", jiraKeys: [], specDocumentIds: [],
-          startedAt: "2026-09-16T09:00:00.000Z", updatedAt: "2026-09-16T10:00:00.000Z",
-          conversationUrl: "https://chatgpt.com/c/canonical-repo-chat",
-        },
-        {
-          id: "old", taskId: "review_2222222222222222", repository: "owner/repo", prNumber: 1,
-          prTitle: "old", prUrl: "https://github.com/owner/repo/pull/1", headSha: "a".repeat(40),
-          status: "completed", phase: "completed", jiraKeys: [], specDocumentIds: [],
-          startedAt: "2026-09-16T07:00:00.000Z", updatedAt: "2026-09-16T08:00:00.000Z",
-          conversationUrl: "https://chatgpt.com/c/old-chat",
-        },
-      ],
+      reviews: [{
+        id: "old", taskId: "review_2222222222222222", repository: "owner/repo", prNumber: 1,
+        prTitle: "old", prUrl: "https://github.com/owner/repo/pull/1", headSha: "a".repeat(40),
+        status: "completed", phase: "completed", jiraKeys: [], specDocumentIds: [],
+        startedAt: "2026-09-16T07:00:00.000Z", updatedAt: "2026-09-16T08:00:00.000Z",
+        conversationUrl: "https://chatgpt.com/c/legacy-review-chat",
+      }],
       webhookDeliveries: [],
     }), "utf8");
 
     const store = new StateStore(file);
     await store.load();
-    expect(store.getRepository("owner/repo")?.chatgptConversationUrl).toBe("https://chatgpt.com/c/canonical-repo-chat");
+    const repository = store.getRepository("owner/repo");
+    expect(repository?.chatgptProjectUrl).toBeUndefined();
+    expect(repository?.chatgptPrConversations).toEqual([]);
+    expect(JSON.parse(await readFile(file, "utf8")).version).toBe(4);
+  });
 
-    await store.updateRepositoryChatConversation("owner/repo", "https://chatgpt.com/c/canonical-repo-chat");
+  it("persists one repository Project and distinct canonical conversations per PR", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "chatgpt-review-project-bindings-"));
+    cleanup.push(root);
+    const file = path.join(root, "state.json");
+    const store = new StateStore(file);
+    await store.load();
+    await store.upsertRepository({
+      id: "repo_2222222222222222",
+      fullName: "owner/repo",
+      addedAt: "2026-09-17T00:00:00.000Z",
+      enabled: true,
+      chatgptPrConversations: [],
+      webhook: { hookId: null, targetUrl: "", status: "pending" },
+    });
+
+    await store.updateRepositoryChatProject("owner/repo", "https://chatgpt.com/g/g-p-project123/c/temporary-project-chat?model=gpt-5");
+    await store.updatePullRequestChatConversation("owner/repo", 101, "https://chatgpt.com/c/pr-101-chat?model=gpt-5");
+    await store.updatePullRequestChatConversation("owner/repo", 102, "https://chatgpt.com/c/pr-102-chat");
+
+    expect(store.getRepository("owner/repo")?.chatgptProjectUrl).toBe("https://chatgpt.com/g/g-p-project123/project");
+    expect(store.getPullRequestChatConversation("owner/repo", 101)).toBe("https://chatgpt.com/c/pr-101-chat");
+    expect(store.getPullRequestChatConversation("owner/repo", 102)).toBe("https://chatgpt.com/c/pr-102-chat");
+
     const reloaded = new StateStore(file);
     await reloaded.load();
-    expect(reloaded.getRepository("owner/repo")?.chatgptConversationUrl).toBe("https://chatgpt.com/c/canonical-repo-chat");
+    expect(reloaded.getPullRequestChatConversation("owner/repo", 101)).toBe("https://chatgpt.com/c/pr-101-chat");
+    expect(reloaded.getPullRequestChatConversation("owner/repo", 102)).toBe("https://chatgpt.com/c/pr-102-chat");
+  });
+
+  it("replaces only the stale PR conversation when the expected URL still matches", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "chatgpt-review-pr-conversation-cas-"));
+    cleanup.push(root);
+    const file = path.join(root, "state.json");
+    const store = new StateStore(file);
+    await store.load();
+    await store.upsertRepository({
+      id: "repo_3333333333333333",
+      fullName: "owner/repo",
+      addedAt: "2026-09-17T00:00:00.000Z",
+      enabled: true,
+      chatgptProjectUrl: "https://chatgpt.com/g/g-p-project123/project",
+      chatgptPrConversations: [],
+      webhook: { hookId: null, targetUrl: "", status: "pending" },
+    });
+    await store.updatePullRequestChatConversation("owner/repo", 101, "https://chatgpt.com/c/stale-pr-101");
+    await store.updatePullRequestChatConversation("owner/repo", 102, "https://chatgpt.com/c/pr-102-stays");
+
+    await store.replacePullRequestChatConversation("owner/repo", 101, "https://chatgpt.com/c/stale-pr-101", "https://chatgpt.com/c/recovered-pr-101");
+    expect(store.getPullRequestChatConversation("owner/repo", 101)).toBe("https://chatgpt.com/c/recovered-pr-101");
+    expect(store.getPullRequestChatConversation("owner/repo", 102)).toBe("https://chatgpt.com/c/pr-102-stays");
+
+    await expect(store.replacePullRequestChatConversation(
+      "owner/repo",
+      101,
+      "https://chatgpt.com/c/stale-pr-101",
+      "https://chatgpt.com/c/should-not-win",
+    )).rejects.toThrow("changed concurrently");
+  });
+
+  it("clears PR conversations when a missing repository Project is replaced", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "chatgpt-review-project-cas-"));
+    cleanup.push(root);
+    const file = path.join(root, "state.json");
+    const store = new StateStore(file);
+    await store.load();
+    await store.upsertRepository({
+      id: "repo_4444444444444444",
+      fullName: "owner/repo",
+      addedAt: "2026-09-17T00:00:00.000Z",
+      enabled: true,
+      chatgptProjectUrl: "https://chatgpt.com/g/g-p-oldproject/project",
+      chatgptPrConversations: [{ prNumber: 101, conversationUrl: "https://chatgpt.com/c/old-pr-chat", updatedAt: "2026-09-17T00:00:00.000Z" }],
+      webhook: { hookId: null, targetUrl: "", status: "pending" },
+    });
+
+    await store.replaceRepositoryChatProject(
+      "owner/repo",
+      "https://chatgpt.com/g/g-p-oldproject/project",
+      "https://chatgpt.com/g/g-p-newproject/project",
+    );
+    expect(store.getRepository("owner/repo")?.chatgptProjectUrl).toBe("https://chatgpt.com/g/g-p-newproject/project");
+    expect(store.getRepository("owner/repo")?.chatgptPrConversations).toEqual([]);
   });
 });
