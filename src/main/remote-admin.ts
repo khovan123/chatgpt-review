@@ -561,19 +561,39 @@ function renderRepository(repo) {
   return '<div class="item"><strong>' + escapeHtml(repo.fullName) + '</strong> <span class="pill ' + (repo.enabled ? 'ok' : 'bad') + '">' + (repo.enabled ? 'enabled' : 'disabled') + '</span>'
     + '<div class="muted">Webhook: ' + escapeHtml(hook.status || 'not synced') + (hook.targetUrl ? ' · ' + escapeHtml(hook.targetUrl) : '') + '</div>'
     + '<div class="muted">ChatGPT: ' + project + ' · PR conversations: ' + conversations.length + '</div>'
-    + '<div class="row"><button onclick="document.getElementById(\'repo\').value=\'' + escapeAttr(repo.fullName) + '\'; post(\'/admin/api/prs/refresh\', { repository: \'' + escapeAttr(repo.fullName) + '\' })">Refresh PRs</button><button onclick="document.getElementById(\'repo\').value=\'' + escapeAttr(repo.fullName) + '\'; post(\'/admin/api/repositories/sync-webhook\', { repository: \'' + escapeAttr(repo.fullName) + '\' })">Sync webhook</button></div></div>';
+    + '<div class="row"><button data-action="refresh-prs" data-repository="' + escapeAttr(repo.fullName) + '">Refresh PRs</button><button data-action="sync-webhook" data-repository="' + escapeAttr(repo.fullName) + '">Sync webhook</button></div></div>';
 }
 function viewSummary(view) { return 'Token accepted. Loaded ' + ((view.repositories || []).length) + ' repo(s), ' + ((view.prs || []).length) + ' PR(s), ' + ((view.reviews || []).length) + ' review(s).'; }
 function row(label, detail, ok) { return '<div class="item"><strong>' + escapeHtml(label) + '</strong> <span class="pill ' + (ok ? 'ok' : 'bad') + '">' + (ok ? 'ready' : 'attention') + '</span><div class="muted">' + escapeHtml(detail || '') + '</div></div>'; }
 function renderPr(pr) {
-  return '<div class="item"><strong>#' + pr.number + ' ' + escapeHtml(pr.title) + '</strong><div class="muted">' + escapeHtml(pr.repository + ' · ' + pr.headBranch + ' → ' + pr.baseBranch) + '</div><div class="row"><button onclick="runReview(\'' + escapeAttr(pr.repository) + '\',' + pr.number + ',false)">Review</button><button onclick="runReview(\'' + escapeAttr(pr.repository) + '\',' + pr.number + ',true)">Re-review head</button><a href="' + escapeAttr(pr.url) + '" target="_blank">Open PR</a></div></div>';
+  return '<div class="item"><strong>#' + pr.number + ' ' + escapeHtml(pr.title) + '</strong><div class="muted">' + escapeHtml(pr.repository + ' · ' + pr.headBranch + ' → ' + pr.baseBranch) + '</div><div class="row"><button data-action="run-review" data-repository="' + escapeAttr(pr.repository) + '" data-pr-number="' + String(pr.number) + '" data-force="false">Review</button><button data-action="run-review" data-repository="' + escapeAttr(pr.repository) + '" data-pr-number="' + String(pr.number) + '" data-force="true">Re-review head</button><a href="' + escapeAttr(pr.url) + '" target="_blank">Open PR</a></div></div>';
 }
 function renderReview(review) {
   const canCancel = review.status === 'running' || review.status === 'queued';
-  return '<div class="item"><strong>' + escapeHtml(review.trigger || 'manual') + ' · ' + escapeHtml(review.phase) + '</strong> <span class="pill">' + escapeHtml(review.status) + '</span><div class="muted">' + escapeHtml(review.repository + ' PR #' + review.prNumber + ' · ' + String(review.headSha || '').slice(0, 10)) + '</div>' + (review.error ? '<div class="bad">' + escapeHtml(review.error) + '</div>' : '') + '<div class="row">' + (canCancel ? '<button class="danger" onclick="cancelReview(\'' + escapeAttr(review.id) + '\')">Cancel</button>' : '') + '</div></div>';
+  return '<div class="item"><strong>' + escapeHtml(review.trigger || 'manual') + ' · ' + escapeHtml(review.phase) + '</strong> <span class="pill">' + escapeHtml(review.status) + '</span><div class="muted">' + escapeHtml(review.repository + ' PR #' + review.prNumber + ' · ' + String(review.headSha || '').slice(0, 10)) + '</div>' + (review.error ? '<div class="bad">' + escapeHtml(review.error) + '</div>' : '') + '<div class="row">' + (canCancel ? '<button class="danger" data-action="cancel-review" data-review-id="' + escapeAttr(review.id) + '">Cancel</button>' : '') + '</div></div>';
 }
-window.runReview = (repository, prNumber, force) => post('/admin/api/reviews/run', { repository, prNumber, force });
-window.cancelReview = (reviewId) => post('/admin/api/reviews/cancel', { reviewId });
+document.addEventListener('click', (event) => {
+  const element = event.target instanceof Element ? event.target.closest('[data-action]') : null;
+  if (!element) return;
+  const action = element.getAttribute('data-action') || '';
+  const repository = element.getAttribute('data-repository') || '';
+  try {
+    if (action === 'refresh-prs') {
+      document.getElementById('repo').value = repository;
+      void post('/admin/api/prs/refresh', { repository });
+    } else if (action === 'sync-webhook') {
+      document.getElementById('repo').value = repository;
+      void post('/admin/api/repositories/sync-webhook', { repository });
+    } else if (action === 'run-review') {
+      const prNumber = Number(element.getAttribute('data-pr-number'));
+      void post('/admin/api/reviews/run', { repository, prNumber, force: element.getAttribute('data-force') === 'true' });
+    } else if (action === 'cancel-review') {
+      void post('/admin/api/reviews/cancel', { reviewId: element.getAttribute('data-review-id') || '' });
+    }
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+});
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch])); }
 function escapeAttr(value) { return escapeHtml(value).replace(/\`/g, '&#096;'); }
 load();
