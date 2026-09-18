@@ -53,7 +53,7 @@ export function createRemoteAdminHandler(dependencies: RemoteAdminDependencies):
     try {
       if (request.method === "GET" && (requestUrl.pathname === "/admin" || requestUrl.pathname === "/admin/")) {
         const suppliedToken = bearerToken(request) || requestUrl.searchParams.get("token") || "";
-        const initialView = suppliedToken && suppliedToken === dependencies.token ? await dependencies.getView() : null;
+        const initialView = suppliedToken && suppliedToken === dependencies.token ? toRemoteAdminView(await dependencies.getView()) : null;
         const initialError = suppliedToken && suppliedToken !== dependencies.token ? "Remote admin token is invalid." : "";
         writeHtml(response, renderAdminHtml(initialView, initialError));
         return true;
@@ -68,7 +68,7 @@ export function createRemoteAdminHandler(dependencies: RemoteAdminDependencies):
       }
 
       if (request.method === "GET" && requestUrl.pathname === "/admin/api/view") {
-        writeJson(response, 200, await dependencies.getView());
+        writeJson(response, 200, toRemoteAdminView(await dependencies.getView()));
         return true;
       }
 
@@ -211,8 +211,111 @@ function safeError(error: unknown): string {
   return error instanceof Error && error.message ? error.message.replace(/[\r\n]+/g, " ").slice(0, 1000) : "unknown error";
 }
 
+
+function toRemoteAdminView(view: AppView): Record<string, unknown> {
+  const root = record(view);
+  const config = record(root.config);
+  return {
+    config: {
+      autoReview: config.autoReview === true,
+      postComment: config.postComment === true,
+      reviewDrafts: config.reviewDrafts === true,
+      requireJiraWhenKeyPresent: config.requireJiraWhenKeyPresent === true,
+      webhookPublicUrl: text(config.webhookPublicUrl),
+      cloudflareHostname: text(config.cloudflareHostname),
+    },
+    provider: root.provider ?? null,
+    chatgpt: root.chatgpt ?? null,
+    webhook: root.webhook ?? null,
+    tunnel: root.tunnel ?? null,
+    repositories: array(root.repositories).map((item) => {
+      const repo = record(item);
+      const webhook = record(repo.webhook);
+      return {
+        id: text(repo.id),
+        fullName: text(repo.fullName),
+        addedAt: text(repo.addedAt),
+        enabled: repo.enabled !== false,
+        chatgptProjectUrl: text(repo.chatgptProjectUrl),
+        chatgptPrConversations: array(repo.chatgptPrConversations).map((conversation) => {
+          const value = record(conversation);
+          return {
+            prNumber: number(value.prNumber),
+            conversationUrl: text(value.conversationUrl),
+            updatedAt: text(value.updatedAt),
+          };
+        }),
+        webhook: repo.webhook
+          ? {
+              hookId: webhook.hookId ?? null,
+              targetUrl: text(webhook.targetUrl),
+              status: text(webhook.status),
+              lastDeliveryAt: text(webhook.lastDeliveryAt),
+              lastEvent: text(webhook.lastEvent),
+            }
+          : null,
+      };
+    }),
+    prs: array(root.prs).map((item) => {
+      const pr = record(item);
+      return {
+        repository: text(pr.repository),
+        number: number(pr.number),
+        title: text(pr.title),
+        url: text(pr.url),
+        headSha: text(pr.headSha),
+        headBranch: text(pr.headBranch),
+        baseBranch: text(pr.baseBranch),
+        isDraft: pr.isDraft === true,
+        state: text(pr.state),
+        author: text(pr.author),
+        changedFiles: number(pr.changedFiles),
+      };
+    }),
+    reviews: array(root.reviews).slice(0, 100).map((item) => {
+      const review = record(item);
+      const jira = record(review.jira);
+      return {
+        id: text(review.id),
+        trigger: text(review.trigger),
+        status: text(review.status),
+        phase: text(review.phase),
+        repository: text(review.repository),
+        prNumber: number(review.prNumber),
+        prTitle: text(review.prTitle),
+        prUrl: text(review.prUrl),
+        headSha: text(review.headSha),
+        startedAt: text(review.startedAt),
+        updatedAt: text(review.updatedAt),
+        completedAt: text(review.completedAt),
+        error: text(review.error),
+        conversationUrl: text(review.conversationUrl),
+        jiraKeys: array(review.jiraKeys).map(text),
+        jiraStatus: text(jira.status),
+      };
+    }),
+  };
+}
+
+function record(value: unknown): Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, any>) : {};
+}
+
+function array(value: unknown): any[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value : value === null || value === undefined ? "" : String(value);
+}
+
+function number(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function safeScriptJson(value: unknown): string {
-  return JSON.stringify(value)
+  return JSON.stringify(value ?? null)
     .replace(/</g, "\\u003c")
     .replace(/>/g, "\\u003e")
     .replace(/&/g, "\\u0026")
@@ -220,7 +323,7 @@ function safeScriptJson(value: unknown): string {
     .replace(/\u2029/g, "\\u2029");
 }
 
-function renderAdminHtml(initialView: AppView | null = null, initialError = ""): string {
+function renderAdminHtml(initialView: Record<string, unknown> | null = null, initialError = ""): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -256,11 +359,11 @@ function renderAdminHtml(initialView: AppView | null = null, initialError = ""):
 
   <section class="card" id="auth-card">
     <h2>Access</h2>
-    <div class="row">
-      <input id="token" type="password" placeholder="Remote admin token" />
-      <button class="primary" id="save-token">Save token</button>
-      <button id="reload">Reload</button>
-    </div>
+    <form class="row" method="get" action="/admin">
+      <input id="token" name="token" type="password" placeholder="Remote admin token" />
+      <button class="primary" id="save-token" type="submit">Save token</button>
+      <button id="reload" type="button">Reload</button>
+    </form>
     <p id="auth-message" class="muted">On the VPS, read the token from <code>~/.config/ChatGPT Review/remote-admin-token</code> for the <code>chatgpt-review</code> user.</p>
   </section>
 
@@ -323,22 +426,25 @@ function renderAdminHtml(initialView: AppView | null = null, initialError = ""):
 
 <script>
 const BOOTSTRAP_VIEW = ${safeScriptJson(initialView)};
-const BOOTSTRAP_ERROR = ${JSON.stringify(initialError)};
+const BOOTSTRAP_ERROR = ${safeScriptJson(initialError)};
 const state = { view: null, busy: false };
+window.addEventListener('error', (event) => showFatal(event.message || String(event.error || 'Unknown script error')));
+window.addEventListener('unhandledrejection', (event) => showFatal(event.reason?.message || String(event.reason || 'Unhandled promise rejection')));
 const tokenInput = document.getElementById('token');
 const initialToken = new URLSearchParams(location.search).get('token') || localStorage.getItem('chatgpt-review-admin-token') || '';
 tokenInput.value = initialToken;
 if (initialToken) localStorage.setItem('chatgpt-review-admin-token', initialToken);
 
-document.getElementById('save-token').onclick = async () => {
+document.getElementById('save-token').onclick = async (event) => {
+  event.preventDefault();
   const token = tokenInput.value.trim();
   if (!token) {
     setAuthMessage('Paste the remote admin token first.', false);
     return;
   }
   localStorage.setItem('chatgpt-review-admin-token', token);
-  setAuthMessage('Token saved locally. Loading remote admin state...', true);
-  await load();
+  setAuthMessage('Token saved locally. Reloading server-rendered remote admin state...', true);
+  location.href = '/admin?token=' + encodeURIComponent(token) + '&v=' + Date.now();
 };
 document.getElementById('reload').onclick = () => load();
 document.getElementById('github-auth').onclick = () => post('/admin/api/github/auth', { token: value('github-token') });
@@ -363,10 +469,22 @@ function authHeaders() { return { 'authorization': 'Bearer ' + adminToken(), 'co
 function setAuthMessage(message, ok) {
   document.getElementById('auth-message').innerHTML = '<span class="' + (ok ? 'ok' : 'bad') + '">' + escapeHtml(message) + '</span>';
 }
+function showFatal(message) {
+  setAuthMessage(message, false);
+  const html = '<div class="bad">' + escapeHtml(message) + '</div>';
+  ['status', 'repositories', 'prs', 'reviews'].forEach((id) => { const element = document.getElementById(id); if (element) element.innerHTML = html; });
+  const output = document.getElementById('operation-output');
+  if (output) output.textContent = message;
+}
 async function api(path, options = {}) {
   const response = await fetch(withToken(path), { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } });
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : null;
+  let payload = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch (_) {
+    payload = { error: text || 'Invalid JSON response' };
+  }
   if (!response.ok) throw new Error(payload?.error || 'HTTP ' + response.status);
   return payload;
 }
@@ -396,7 +514,7 @@ async function load() {
     if (BOOTSTRAP_VIEW && !bootstrapConsumed) {
       state.view = BOOTSTRAP_VIEW;
       bootstrapConsumed = true;
-      setAuthMessage('Token accepted. GitHub, ChatGPT, repositories, PRs and reviews loaded from the worker.', true);
+      setAuthMessage(viewSummary(state.view), true);
       render();
       return;
     }
@@ -409,7 +527,7 @@ async function load() {
       return;
     }
     state.view = await api('/admin/api/view');
-    setAuthMessage('Token accepted. GitHub, ChatGPT, repositories, PRs and reviews synced from the worker.', true);
+    setAuthMessage(viewSummary(state.view), true);
     render();
   } catch (error) {
     const message = error.message || String(error);
@@ -445,13 +563,14 @@ function renderRepository(repo) {
     + '<div class="muted">ChatGPT: ' + project + ' · PR conversations: ' + conversations.length + '</div>'
     + '<div class="row"><button onclick="document.getElementById(\'repo\').value=\'' + escapeAttr(repo.fullName) + '\'; post(\'/admin/api/prs/refresh\', { repository: \'' + escapeAttr(repo.fullName) + '\' })">Refresh PRs</button><button onclick="document.getElementById(\'repo\').value=\'' + escapeAttr(repo.fullName) + '\'; post(\'/admin/api/repositories/sync-webhook\', { repository: \'' + escapeAttr(repo.fullName) + '\' })">Sync webhook</button></div></div>';
 }
+function viewSummary(view) { return 'Token accepted. Loaded ' + ((view.repositories || []).length) + ' repo(s), ' + ((view.prs || []).length) + ' PR(s), ' + ((view.reviews || []).length) + ' review(s).'; }
 function row(label, detail, ok) { return '<div class="item"><strong>' + escapeHtml(label) + '</strong> <span class="pill ' + (ok ? 'ok' : 'bad') + '">' + (ok ? 'ready' : 'attention') + '</span><div class="muted">' + escapeHtml(detail || '') + '</div></div>'; }
 function renderPr(pr) {
   return '<div class="item"><strong>#' + pr.number + ' ' + escapeHtml(pr.title) + '</strong><div class="muted">' + escapeHtml(pr.repository + ' · ' + pr.headBranch + ' → ' + pr.baseBranch) + '</div><div class="row"><button onclick="runReview(\'' + escapeAttr(pr.repository) + '\',' + pr.number + ',false)">Review</button><button onclick="runReview(\'' + escapeAttr(pr.repository) + '\',' + pr.number + ',true)">Re-review head</button><a href="' + escapeAttr(pr.url) + '" target="_blank">Open PR</a></div></div>';
 }
 function renderReview(review) {
   const canCancel = review.status === 'running' || review.status === 'queued';
-  return '<div class="item"><strong>' + escapeHtml(review.trigger || 'manual') + ' · ' + escapeHtml(review.phase) + '</strong> <span class="pill">' + escapeHtml(review.status) + '</span><div class="muted">' + escapeHtml(review.repository + ' PR #' + review.prNumber + ' · ' + review.headSha.slice(0, 10)) + '</div>' + (review.error ? '<div class="bad">' + escapeHtml(review.error) + '</div>' : '') + '<div class="row">' + (canCancel ? '<button class="danger" onclick="cancelReview(\'' + escapeAttr(review.id) + '\')">Cancel</button>' : '') + '</div></div>';
+  return '<div class="item"><strong>' + escapeHtml(review.trigger || 'manual') + ' · ' + escapeHtml(review.phase) + '</strong> <span class="pill">' + escapeHtml(review.status) + '</span><div class="muted">' + escapeHtml(review.repository + ' PR #' + review.prNumber + ' · ' + String(review.headSha || '').slice(0, 10)) + '</div>' + (review.error ? '<div class="bad">' + escapeHtml(review.error) + '</div>' : '') + '<div class="row">' + (canCancel ? '<button class="danger" onclick="cancelReview(\'' + escapeAttr(review.id) + '\')">Cancel</button>' : '') + '</div></div>';
 }
 window.runReview = (repository, prNumber, force) => post('/admin/api/reviews/run', { repository, prNumber, force });
 window.cancelReview = (reviewId) => post('/admin/api/reviews/cancel', { reviewId });
