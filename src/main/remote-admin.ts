@@ -249,7 +249,7 @@ function renderAdminHtml(): string {
       <button class="primary" id="save-token">Save token</button>
       <button id="reload">Reload</button>
     </div>
-    <p class="muted">On the VPS, read the token from <code>~/.config/ChatGPT Review/remote-admin-token</code> for the <code>chatgpt-review</code> user.</p>
+    <p id="auth-message" class="muted">On the VPS, read the token from <code>~/.config/ChatGPT Review/remote-admin-token</code> for the <code>chatgpt-review</code> user.</p>
   </section>
 
   <main class="grid">
@@ -307,10 +307,20 @@ function renderAdminHtml(): string {
 <script>
 const state = { view: null, busy: false };
 const tokenInput = document.getElementById('token');
-tokenInput.value = localStorage.getItem('chatgpt-review-admin-token') || new URLSearchParams(location.search).get('token') || '';
-if (tokenInput.value) localStorage.setItem('chatgpt-review-admin-token', tokenInput.value);
+const initialToken = new URLSearchParams(location.search).get('token') || localStorage.getItem('chatgpt-review-admin-token') || '';
+tokenInput.value = initialToken;
+if (initialToken) localStorage.setItem('chatgpt-review-admin-token', initialToken);
 
-document.getElementById('save-token').onclick = () => { localStorage.setItem('chatgpt-review-admin-token', tokenInput.value.trim()); load(); };
+document.getElementById('save-token').onclick = async () => {
+  const token = tokenInput.value.trim();
+  if (!token) {
+    setAuthMessage('Paste the remote admin token first.', false);
+    return;
+  }
+  localStorage.setItem('chatgpt-review-admin-token', token);
+  setAuthMessage('Token saved locally. Loading remote admin state...', true);
+  await load();
+};
 document.getElementById('reload').onclick = () => load();
 document.getElementById('github-auth').onclick = () => post('/admin/api/github/auth', { token: value('github-token') });
 document.getElementById('chatgpt-setup').onclick = () => post('/admin/api/chatgpt/setup', {});
@@ -323,9 +333,19 @@ document.getElementById('build-app').onclick = async () => { const res = await p
 
 function value(id) { return document.getElementById(id).value.trim(); }
 function repoValue() { const repo = value('repo'); if (!repo) throw new Error('Repository is required.'); return repo; }
-function authHeaders() { return { 'authorization': 'Bearer ' + (localStorage.getItem('chatgpt-review-admin-token') || tokenInput.value.trim()), 'content-type': 'application/json' }; }
+function adminToken() { return (localStorage.getItem('chatgpt-review-admin-token') || tokenInput.value || '').trim(); }
+function withToken(path) {
+  const token = adminToken();
+  if (!token) return path;
+  const separator = path.includes('?') ? '&' : '?';
+  return path + separator + 'token=' + encodeURIComponent(token);
+}
+function authHeaders() { return { 'authorization': 'Bearer ' + adminToken(), 'content-type': 'application/json' }; }
+function setAuthMessage(message, ok) {
+  document.getElementById('auth-message').innerHTML = '<span class="' + (ok ? 'ok' : 'bad') + '">' + escapeHtml(message) + '</span>';
+}
 async function api(path, options = {}) {
-  const response = await fetch(path, { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } });
+  const response = await fetch(withToken(path), { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } });
   const text = await response.text();
   const payload = text ? JSON.parse(text) : null;
   if (!response.ok) throw new Error(payload?.error || 'HTTP ' + response.status);
@@ -347,10 +367,18 @@ async function post(path, body, refresh = true) {
 async function load() {
   try {
     setBusy(true);
+    if (!adminToken()) {
+      setAuthMessage('Paste the remote admin token, then Save token.', false);
+      document.getElementById('status').innerHTML = '<div class="muted">Waiting for remote admin token.</div>';
+      return;
+    }
     state.view = await api('/admin/api/view');
+    setAuthMessage('Token accepted. Remote admin state loaded.', true);
     render();
   } catch (error) {
-    document.getElementById('status').innerHTML = '<div class="bad">' + escapeHtml(error.message || String(error)) + '</div>';
+    const message = error.message || String(error);
+    setAuthMessage(message, false);
+    document.getElementById('status').innerHTML = '<div class="bad">' + escapeHtml(message) + '</div>';
   } finally {
     setBusy(false);
   }
