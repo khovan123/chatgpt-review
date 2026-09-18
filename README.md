@@ -76,6 +76,34 @@ The local listener defaults to:
 http://127.0.0.1:8787
 ```
 
+
+## Remote web administration
+
+The same local listener that receives GitHub webhooks also exposes an authenticated remote admin UI at:
+
+```text
+https://<cloudflare-hostname>/admin
+```
+
+This is intended for VPS deployments so the worker can be managed without VNC for day-to-day operations. The remote page uses a separate app-generated 32-byte token stored outside the repository at the Electron user-data path as `remote-admin-token`. On the VPS, read it as the service user, for example:
+
+```bash
+runuser -u chatgpt-review -- cat "/home/chatgpt-review/.config/ChatGPT Review/remote-admin-token"
+```
+
+Remote admin capabilities are deliberately bounded and token-protected:
+
+- view GitHub, ChatGPT, webhook and Cloudflare readiness;
+- authenticate `gh` by pasting a GitHub token once into `gh auth login --with-token`;
+- link/unlink repositories and synchronize their GitHub webhooks;
+- refresh open PRs;
+- trigger or force re-run a review;
+- cancel queued/running reviews;
+- restart the configured Cloudflare tunnel;
+- run the fixed project build command (`npm run build`) and return bounded output.
+
+The remote UI does not expose arbitrary shell execution. ChatGPT sign-in and connector setup still happen inside the app-owned Electron ChatGPT session; the remote button opens that setup window on the VPS display when manual sign-in/connector repair is needed.
+
 ## Webhook security
 
 - app-generated 32-byte GitHub webhook secret stored outside the repository;

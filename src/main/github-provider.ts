@@ -13,6 +13,14 @@ export interface GitHubWebhookRegistration {
 }
 
 export class GitHubProvider {
+  async authenticateWithToken(token: string): Promise<void> {
+    const normalized = token.trim();
+    if (normalized.length < 20 || normalized.length > 4096 || /[\r\n]/.test(normalized)) {
+      throw new Error("GitHub token is invalid.");
+    }
+    await runGhWithStdin(["auth", "login", "--hostname", "github.com", "--with-token"], `${normalized}\n`);
+  }
+
   async status(): Promise<{ ghInstalled: boolean; ghAuthenticated: boolean; detail: string }> {
     try {
       await runGh(["--version"]);
@@ -133,6 +141,52 @@ async function runGh(args: string[], maxBuffer = 2 * 1024 * 1024): Promise<strin
   } catch (error) {
     throw new Error(`GitHub CLI failed: ${safeError(error)}`);
   }
+}
+
+
+async function runGhWithStdin(args: string[], input: string, maxBuffer = 2 * 1024 * 1024): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn("gh", args, {
+      env: ghEnvironment(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(new Error("GitHub CLI authentication timed out."));
+    }, 120_000);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes <= maxBuffer) stdout.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes <= 256 * 1024) stderr.push(chunk);
+    });
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(`GitHub CLI failed: ${safeError(error)}`));
+    });
+    child.once("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const out = Buffer.concat(stdout).toString("utf8");
+      const err = Buffer.concat(stderr).toString("utf8").replace(/[\r\n]+/g, " ").trim();
+      if (code === 0) resolve(out);
+      else reject(new Error(`GitHub CLI failed: ${err || `exit ${code ?? "unknown"}`}`));
+    });
+    child.stdin.end(input);
+  });
 }
 
 async function runGhJson(method: "POST" | "PATCH", endpoint: string, payload: unknown): Promise<string> {

@@ -1,4 +1,6 @@
+import { execFile } from "node:child_process";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } from "electron";
 
@@ -6,6 +8,7 @@ import { ChatGptWebDriver } from "./main/chatgpt-web-driver";
 import { CloudflareApiProvisioner } from "./main/cloudflare-api";
 import { CloudflareNamedTunnelManager, cloudflareOriginUrl, normalizeCloudflareHostname } from "./main/cloudflare-tunnel";
 import { GitHubProvider, normalizeGitHubRepositoryInput } from "./main/github-provider";
+import { createRemoteAdminHandler, RemoteAdminTokenStore, type RemoteAdminBuildResult } from "./main/remote-admin";
 import { ReviewEngine, type ReviewEngineEvent } from "./main/review-engine";
 import { SpecMemoryStore } from "./main/spec-memory";
 import { StateStore } from "./main/state-store";
@@ -14,6 +17,7 @@ import { GitHubWebhookServer, WEBHOOK_HEALTH_PATH, WebhookSecretStore } from "./
 
 let mainWindow: BrowserWindow | null = null;
 let engine: ReviewEngine | null = null;
+let github: GitHubProvider | null = null;
 let state: StateStore | null = null;
 let specs: SpecMemoryStore | null = null;
 let chatgpt: ChatGptWebDriver | null = null;
@@ -21,20 +25,29 @@ let webhookServer: GitHubWebhookServer | null = null;
 let cloudflare: CloudflareNamedTunnelManager | null = null;
 let cloudflareApi: CloudflareApiProvisioner | null = null;
 
+const execFileAsync = promisify(execFile);
+
 void app.whenReady().then(async () => {
   const userData = app.getPath("userData");
   state = new StateStore(path.join(userData, "state.json"));
   specs = new SpecMemoryStore(path.join(userData, "spec-memory.json"));
   const secretStore = new WebhookSecretStore(path.join(userData, "github-webhook-secret"));
-  const [, , webhookSecret] = await Promise.all([state.load(), specs.load(), secretStore.loadOrCreate()]);
+  const adminTokenStore = new RemoteAdminTokenStore(path.join(userData, "remote-admin-token"));
+  const [, , webhookSecret, remoteAdminToken] = await Promise.all([
+    state.load(),
+    specs.load(),
+    secretStore.loadOrCreate(),
+    adminTokenStore.loadOrCreate(),
+  ]);
 
   chatgpt = new ChatGptWebDriver((progress) => {
     publish({ type: "progress", taskId: progress.taskId, message: progress.text });
   });
+  github = new GitHubProvider();
   engine = new ReviewEngine({
     state,
     specs,
-    github: new GitHubProvider(),
+    github,
     chatgpt,
     webhookSecret,
     onEvent: publish,
@@ -44,6 +57,20 @@ void app.whenReady().then(async () => {
     secret: webhookSecret,
     onEvent: (event) => requireEngine().handleWebhookEvent(event),
     onProgress: (message) => publish({ type: "progress", message }),
+    onExtraRequest: createRemoteAdminHandler({
+      token: remoteAdminToken,
+      getView: getAppView,
+      authenticateGitHubToken: authenticateGitHubTokenFromRemote,
+      linkRepository: linkRepositoryFromRemote,
+      unlinkRepository: unlinkRepositoryFromRemote,
+      syncRepositoryWebhook: syncRepositoryWebhookFromRemote,
+      refreshPullRequests: refreshPullRequestsFromRemote,
+      runReview: runReviewFromRemote,
+      cancelReview: cancelReviewFromRemote,
+      openChatGptSetup: openChatGptSetupFromRemote,
+      restartCloudflare: restartCloudflareFromRemote,
+      triggerBuild: triggerBuildFromRemote,
+    }),
   });
   cloudflare = new CloudflareNamedTunnelManager({
     storageDirectory: userData,
@@ -421,6 +448,88 @@ function localTunnelOrigin(config: ReviewConfig): string {
   return `http://${formatted}:${config.webhookListenPort}`;
 }
 
+
+async function authenticateGitHubTokenFromRemote(token: string): Promise<AppView> {
+  await requireGitHubProvider().authenticateWithToken(token);
+  await requireEngine().refreshProviderStatus();
+  return getAppView();
+}
+
+async function linkRepositoryFromRemote(repositoryInput: string): Promise<AppView> {
+  const repository = normalizeGitHubRepositoryInput(repositoryInput);
+  const tunnel = requireCloudflare().status();
+  if (!tunnel.running || !tunnel.reachable) throw new Error("Connect and verify your personal Cloudflare named tunnel before linking repositories.");
+  await requireEngine().linkRepository(repository);
+  return getAppView();
+}
+
+async function unlinkRepositoryFromRemote(repositoryInput: string): Promise<AppView> {
+  const repository = normalizeGitHubRepositoryInput(repositoryInput);
+  await requireEngine().unlinkRepository(repository);
+  return getAppView();
+}
+
+async function syncRepositoryWebhookFromRemote(repositoryInput: string): Promise<AppView> {
+  const repository = normalizeGitHubRepositoryInput(repositoryInput);
+  const tunnel = requireCloudflare().status();
+  if (!tunnel.running || !tunnel.reachable) throw new Error("Personal Cloudflare named tunnel is not ready.");
+  await requireEngine().syncRepositoryWebhook(repository);
+  return getAppView();
+}
+
+async function refreshPullRequestsFromRemote(repositoryInput?: string): Promise<AppView> {
+  const repository = repositoryInput ? normalizeGitHubRepositoryInput(repositoryInput) : undefined;
+  await requireEngine().refreshPullRequests(repository);
+  return getAppView();
+}
+
+async function runReviewFromRemote(repositoryInput: string, prNumber: number, force: boolean): Promise<unknown> {
+  const repository = normalizeGitHubRepositoryInput(repositoryInput);
+  return requireEngine().enqueueReview(repository, prNumber, force, "remote-web");
+}
+
+async function cancelReviewFromRemote(reviewId: string): Promise<AppView> {
+  await requireEngine().cancelReview(reviewId);
+  return getAppView();
+}
+
+async function openChatGptSetupFromRemote(): Promise<void> {
+  await requireChatGpt().showSetup();
+}
+
+async function restartCloudflareFromRemote(): Promise<AppView> {
+  const config = requireState().getConfig();
+  if (!config.cloudflareHostname) throw new Error("Connect a personal Cloudflare named tunnel first.");
+  await requireCloudflare().restore({ hostname: config.cloudflareHostname, originUrl: localTunnelOrigin(config) });
+  await verifyCloudflareRoute(config.cloudflareHostname);
+  requireCloudflare().setRouteValidation(true);
+  await requireEngine().syncAllWebhooks();
+  return getAppView();
+}
+
+async function triggerBuildFromRemote(): Promise<RemoteAdminBuildResult> {
+  try {
+    const result = await execFileAsync("npm", ["run", "build"], {
+      cwd: app.getAppPath(),
+      encoding: "utf8",
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024,
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        USER: process.env.USER,
+        NODE_ENV: process.env.NODE_ENV,
+      },
+    });
+    return { ok: true, output: `${result.stdout}${result.stderr}`.slice(-60_000) };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown build error";
+    const stdout = isRecord(error) && typeof error.stdout === "string" ? error.stdout : "";
+    const stderr = isRecord(error) && typeof error.stderr === "string" ? error.stderr : "";
+    return { ok: false, output: `${stdout}${stderr}\n${detail}`.slice(-60_000) };
+  }
+}
+
 async function getAppView(): Promise<AppView> {
   return {
     ...await requireEngine().view(),
@@ -454,6 +563,11 @@ function validateConfigInput(input: Record<string, any>): void {
 function repositoryFromInput(input: unknown): string {
   if (!isRecord(input) || typeof input.repository !== "string") throw new Error("Repository is required.");
   return normalizeGitHubRepositoryInput(input.repository);
+}
+
+function requireGitHubProvider(): GitHubProvider {
+  if (!github) throw new Error("GitHub provider is not initialized.");
+  return github;
 }
 
 function requireEngine(): ReviewEngine {

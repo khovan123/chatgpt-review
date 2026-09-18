@@ -10,6 +10,8 @@ export const WEBHOOK_PATH = "/webhooks/v1/github";
 export const WEBHOOK_HEALTH_PATH = "/healthz";
 const MAX_BODY_BYTES = 256 * 1024;
 
+export type ExtraHttpHandler = (request: IncomingMessage, response: ServerResponse, requestUrl: URL) => Promise<boolean> | boolean;
+
 export interface GitHubWebhookEvent {
   deliveryId: string;
   event: string;
@@ -47,6 +49,7 @@ export class GitHubWebhookServer {
     secret: string;
     onEvent: (event: GitHubWebhookEvent) => Promise<void>;
     onProgress?: (message: string) => void;
+    onExtraRequest?: ExtraHttpHandler;
   }) {}
 
   status(): WebhookRuntimeStatus {
@@ -110,6 +113,10 @@ export class GitHubWebhookServer {
 
     if (request.method === "GET" && requestUrl.pathname === WEBHOOK_HEALTH_PATH) {
       writeJson(response, 200, { status: "ok", service: "chatgpt-review-webhook" });
+      return;
+    }
+
+    if (this.dependencies.onExtraRequest && await this.dependencies.onExtraRequest(request, response, requestUrl)) {
       return;
     }
 
