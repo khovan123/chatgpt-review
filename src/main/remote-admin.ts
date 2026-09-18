@@ -331,273 +331,388 @@ function renderAdminHtml(initialView: Record<string, unknown> | null = null, ini
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>ChatGPT Review Remote Admin</title>
   <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f0f0f; color: #f5f5f5; }
-    body { margin: 0; padding: 24px; background: #0f0f0f; }
-    h1, h2, h3 { margin: 0 0 12px; }
-    button, input { font: inherit; }
-    input { background: #171717; border: 1px solid #3a3a3a; color: #f5f5f5; border-radius: 10px; padding: 10px 12px; min-width: 220px; }
-    button { border: 1px solid #444; background: #242424; color: #fff; border-radius: 10px; padding: 10px 12px; cursor: pointer; }
-    button.primary { background: #2c7be5; border-color: #2c7be5; }
-    button.danger { background: #5c1d1d; border-color: #8f3434; }
-    button:disabled { opacity: 0.55; cursor: wait; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
-    .card { background: #171717; border: 1px solid #2d2d2d; border-radius: 16px; padding: 16px; }
-    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
-    .muted { color: #aaa; }
-    .ok { color: #65d67f; }
-    .bad { color: #ff8d8d; }
-    .pill { border: 1px solid #3a3a3a; border-radius: 999px; padding: 2px 8px; font-size: 12px; color: #ccc; }
-    .list { display: grid; gap: 10px; }
-    .item { border: 1px solid #2b2b2b; border-radius: 12px; padding: 12px; background: #121212; }
-    pre { white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; background: #0b0b0b; border: 1px solid #333; border-radius: 12px; padding: 12px; }
-    a { color: #8ab4ff; }
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #11100f;
+      color: #f4f2ee;
+      --background: #11100f;
+      --surface: #171614;
+      --surface-raised: #1d1b18;
+      --sidebar: #181715;
+      --sidebar-hover: #25231f;
+      --sidebar-active: #302d29;
+      --border: #34312c;
+      --border-soft: #292722;
+      --foreground: #f4f2ee;
+      --muted: #aaa49b;
+      --muted-2: #7f7970;
+      --primary: #e9e4dc;
+      --danger: #ff9d9d;
+      --warning: #e6c272;
+      --success: #8fd6a9;
+      --info: #9dbcf0;
+      --shadow: rgba(0,0,0,.34);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: var(--background); }
+    body { min-width: 980px; color: var(--foreground); }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+    .hidden { display: none !important; }
+    .desktop-shell { display: grid; grid-template-columns: 258px minmax(0,1fr); width: 100vw; height: 100vh; }
+    .app-sidebar { position: relative; z-index: 10; display: flex; min-height: 0; flex-direction: column; border-right: 1px solid var(--border); background: var(--sidebar); padding: 12px; }
+    .brand-row { display: flex; align-items: center; gap: 10px; padding: 4px 8px 14px; }
+    .brand-mark { display: grid; width: 32px; height: 32px; flex: 0 0 32px; place-items: center; border: 1px solid #49453f; border-radius: 9px; background: #24211e; color: #fff; font-size: 10px; font-weight: 800; letter-spacing: .04em; }
+    .brand-copy { min-width: 0; }
+    .brand-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 650; letter-spacing: -.01em; }
+    .brand-copy span { display: block; margin-top: 2px; color: var(--muted); font-size: 10.5px; }
+    .remote-access { display: grid; gap: 8px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-raised); padding: 10px; }
+    .remote-access-label { color: var(--muted-2); font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+    .remote-access-form { display: grid; gap: 7px; }
+    .remote-token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+    .sidebar-scroll { min-height: 0; flex: 1; overflow-y: auto; padding: 18px 0 12px; }
+    .sidebar-section-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 7px; color: var(--muted-2); font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+    .sidebar-repositories, .sidebar-reviews { display: grid; gap: 2px; }
+    .repository-nav-item { position: relative; display: grid; grid-template-columns: 18px minmax(0,1fr) 8px; align-items: center; gap: 8px; width: 100%; min-height: 48px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); padding: 7px 9px; text-align: left; transition: background .15s ease, color .15s ease; }
+    .repository-nav-item:hover { background: var(--sidebar-hover); color: var(--foreground); }
+    .repository-nav-item.selected { background: var(--sidebar-active); color: var(--foreground); box-shadow: inset 0 0 0 1px var(--border); }
+    .repository-active-accent { position: absolute; left: 0; top: 50%; width: 3px; height: 22px; transform: translateY(-50%); border-radius: 0 4px 4px 0; background: var(--primary); opacity: 0; }
+    .repository-nav-item.selected .repository-active-accent { opacity: 1; }
+    .repository-icon { color: var(--muted-2); font-size: 16px; }
+    .repository-nav-copy { min-width: 0; }
+    .repository-nav-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 600; }
+    .repository-nav-meta { display: block; margin-top: 2px; color: var(--muted-2); font-size: 9.5px; font-weight: 500; }
+    .repo-health { display: block; width: 7px; height: 7px; border-radius: 999px; background: var(--muted-2); }
+    .repo-health.success { background: var(--success); }
+    .repo-health.warning { background: var(--warning); }
+    .repo-health.danger { background: var(--danger); }
+    .sidebar-footer { flex: 0 0 auto; border-top: 1px solid var(--border-soft); padding-top: 9px; }
+    .sidebar-settings { display: flex; width: 100%; align-items: center; gap: 9px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); padding: 9px 10px; text-align: left; font-size: 12px; font-weight: 550; }
+    .sidebar-settings:hover { background: var(--sidebar-hover); color: var(--foreground); }
+    .workspace-surface { position: relative; display: grid; min-width: 0; min-height: 0; grid-template-rows: minmax(0,1fr); background: var(--background); }
+    .notice { position: fixed; z-index: 120; top: 16px; right: 18px; max-width: 520px; border: 1px solid #465263; border-radius: 9px; background: #151d27; box-shadow: 0 12px 32px var(--shadow); color: #dbe6f3; padding: 10px 12px; font-size: 10.5px; line-height: 1.45; }
+    .notice.error { border-color: #673c40; background: #271718; color: #ffc4c7; }
+    .review-workspace { display: grid; min-width: 0; min-height: 0; grid-template-columns: 326px minmax(0,1fr); }
+    .pr-column { min-width: 0; min-height: 0; overflow-y: auto; border-right: 1px solid var(--border); background: #141310; padding: 17px 12px; }
+    .column-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 5px 11px; }
+    .column-eyebrow { margin: 0 0 5px; color: var(--muted-2); font-size: 9px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase; }
+    .column-header h2, .history-heading h3 { margin: 0; font-size: 13px; font-weight: 650; }
+    .count-pill { display: inline-flex; min-width: 24px; height: 22px; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--muted); padding: 0 7px; font-size: 9.5px; font-weight: 650; }
+    .pr-list { display: grid; gap: 3px; }
+    .pr-nav-item { display: grid; gap: 6px; width: 100%; border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--foreground); padding: 10px; text-align: left; transition: background .15s ease, border-color .15s ease; }
+    .pr-nav-item:hover { background: #211f1b; }
+    .pr-nav-item.selected { border-color: var(--border); background: var(--sidebar-active); }
+    .pr-nav-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .pr-number { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 9.5px; }
+    .pr-nav-title { display: -webkit-box; overflow: hidden; color: #eeeae4; font-size: 11.5px; font-weight: 600; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+    .pr-nav-meta { overflow: hidden; color: var(--muted-2); font-size: 9.5px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+    .review-detail { min-width: 0; min-height: 0; overflow-y: auto; background: var(--background); }
+    .pr-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; border-bottom: 1px solid var(--border); padding: 24px 28px 22px; }
+    .pr-detail-title-group { min-width: 0; }
+    .mono-label { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; }
+    .pr-detail-header h2 { margin: 0; max-width: 850px; font-size: 20px; font-weight: 650; line-height: 1.3; letter-spacing: -.02em; }
+    .pr-detail-meta { margin: 8px 0 0; color: var(--muted); font-size: 10.5px; }
+    .workspace-actions, .button-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .history-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 22px 28px 10px; }
+    .review-list { display: grid; gap: 10px; padding: 0 28px 36px; }
+    .review-item, .panel-card { border: 1px solid var(--border); border-radius: 11px; background: var(--surface); padding: 14px; }
+    .review-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .review-title { color: #e9e5de; font-size: 11.5px; font-weight: 650; }
+    .review-meta { margin-top: 4px; color: var(--muted-2); font-size: 9.5px; line-height: 1.45; }
+    .review-body { display: grid; gap: 11px; margin-top: 12px; }
+    .review-summary { color: #d4cfc7; font-size: 11px; line-height: 1.58; white-space: pre-wrap; }
+    .review-error { color: var(--danger); font-size: 10.5px; line-height: 1.5; white-space: pre-wrap; }
+    .overview-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; padding: 0 28px 36px; }
+    .panel-card h3 { margin: 0 0 8px; font-size: 12px; }
+    .panel-card p { margin: 0 0 10px; color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+    .connection-list { display: grid; gap: 0; overflow: hidden; border: 1px solid var(--border-soft); border-radius: 9px; background: #12110f; }
+    .connection-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px; }
+    .connection-item + .connection-item { border-top: 1px solid var(--border-soft); }
+    .connection-copy strong { display: block; font-size: 10.5px; }
+    .connection-copy span { display: block; margin-top: 3px; overflow-wrap: anywhere; color: var(--muted); font-size: 9.5px; line-height: 1.45; }
+    .button { min-height: 32px; border: 1px solid #e4dfd7; border-radius: 8px; background: #ece8e1; color: #171513; padding: 7px 11px; font-size: 10.5px; font-weight: 700; text-decoration: none; }
+    .button:hover { background: #fff; }
+    .button.secondary { border-color: var(--border); background: var(--surface-raised); color: #ded9d1; }
+    .button.secondary:hover { background: var(--sidebar-hover); }
+    .button.danger { border-color: #60383b; background: transparent; color: var(--danger); }
+    .button.danger:hover { background: #271718; }
+    .badge { display: inline-flex; min-height: 19px; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 999px; padding: 2px 7px; font-size: 8.5px; font-weight: 750; white-space: nowrap; }
+    .badge.success { border-color: #315a42; background: #14271c; color: var(--success); }
+    .badge.warning { border-color: #62502b; background: #251f12; color: var(--warning); }
+    .badge.danger { border-color: #62383b; background: #271718; color: var(--danger); }
+    .badge.info { border-color: #364e6c; background: #151d28; color: var(--info); }
+    input, select { width: 100%; min-height: 34px; border: 1px solid var(--border); border-radius: 8px; outline: none; background: #141310; color: var(--foreground); padding: 7px 9px; font-size: 10.5px; }
+    input:focus, select:focus { border-color: #6e685e; box-shadow: 0 0 0 2px rgba(255,255,255,.035); }
+    .setting-grid { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+    .empty { color: var(--muted); padding: 16px 8px; font-size: 10.5px; line-height: 1.5; }
+    a { color: #8ab4ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    @media (max-width: 1120px) { .desktop-shell { grid-template-columns: 224px minmax(0,1fr); } .review-workspace { grid-template-columns: 286px minmax(0,1fr); } .overview-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
-  <h1>ChatGPT Review Remote Admin</h1>
-  <p class="muted">Manage the VPS review worker from another machine. API calls require the remote admin token.</p>
-
-  <section class="card" id="auth-card">
-    <h2>Access</h2>
-    <form class="row" method="get" action="/admin">
-      <input id="token" name="token" type="password" placeholder="Remote admin token" />
-      <button class="primary" id="save-token" type="submit">Save token</button>
-      <button id="reload" type="button">Reload</button>
-    </form>
-    <p id="auth-message" class="muted">On the VPS, read the token from <code>~/.config/ChatGPT Review/remote-admin-token</code> for the <code>chatgpt-review</code> user.</p>
-  </section>
-
-  <main class="grid">
-    <section class="card">
-      <h2>Status</h2>
-      <div id="status" class="list"></div>
-    </section>
-
-    <section class="card">
-      <h2>GitHub setup</h2>
-      <p class="muted">Paste a GitHub token once. The app passes it to <code>gh auth login --with-token</code>; it is not stored by this web UI.</p>
-      <div class="row">
-        <input id="github-token" type="password" placeholder="GitHub token" />
-        <button id="github-auth">Authenticate gh</button>
+  <div class="desktop-shell">
+    <aside class="app-sidebar" aria-label="Remote administration navigation">
+      <div class="brand-row">
+        <div class="brand-mark" aria-hidden="true">CR</div>
+        <div class="brand-copy"><strong>ChatGPT Review</strong><span>Remote admin</span></div>
       </div>
-    </section>
-
-    <section class="card">
-      <h2>ChatGPT setup</h2>
-      <p class="muted">This opens the ChatGPT setup window on the VPS display/session. Use it when the worker needs login or connector setup.</p>
-      <button id="chatgpt-setup">Open ChatGPT setup</button>
-    </section>
-
-    <section class="card">
-      <h2>Repository</h2>
-      <div class="row">
-        <input id="repo" placeholder="owner/repo" />
-        <button id="repo-link">Link</button>
-        <button id="repo-sync">Sync webhook</button>
-        <button id="repo-unlink" class="danger">Unlink</button>
+      <section class="remote-access">
+        <div class="remote-access-label">Access</div>
+        <form id="tokenForm" class="remote-access-form" method="get" action="/admin/">
+          <div class="remote-token-row">
+            <input id="token" name="token" type="password" placeholder="Remote token" autocomplete="current-password" />
+            <button class="button" id="save-token" type="submit">Save</button>
+          </div>
+          <button id="reload" class="button secondary" type="button">Reload</button>
+        </form>
+        <div id="auth-message" class="repository-nav-meta">Read token from the VPS remote-admin-token file.</div>
+      </section>
+      <nav class="sidebar-scroll" aria-label="Repositories">
+        <div class="sidebar-section-heading"><span>Repositories</span><span id="repoCount">0</span></div>
+        <div id="repositories" class="sidebar-repositories"></div>
+        <div class="sidebar-section-heading" style="margin-top:18px"><span>Recent</span><span id="reviewCount">0</span></div>
+        <div id="sidebarReviews" class="sidebar-reviews"></div>
+      </nav>
+      <div class="sidebar-footer">
+        <button class="sidebar-settings" data-action="show-overview" type="button"><span aria-hidden="true">⚙</span><span>Workspace</span></button>
       </div>
-      <button id="refresh-prs">Refresh PRs</button>
-    </section>
-
-    <section class="card">
-      <h2>Operations</h2>
-      <div class="row">
-        <button id="cloudflare-restart">Restart Cloudflare tunnel</button>
-        <button id="build-app">Run npm build</button>
+    </aside>
+    <main class="workspace-surface">
+      <section id="notice" class="notice hidden" role="status"></section>
+      <div class="review-workspace">
+        <section class="pr-column" aria-label="Open pull requests">
+          <div class="column-header">
+            <div><p class="column-eyebrow">OPEN</p><h2>Pull requests</h2></div>
+            <span id="prCount" class="count-pill">0</span>
+          </div>
+          <div id="prs" class="pr-list"></div>
+        </section>
+        <section id="detail" class="review-detail" aria-label="Remote admin detail"></section>
       </div>
-      <pre id="operation-output" class="muted"></pre>
-    </section>
-  </main>
-
-  <section class="card" style="margin-top:16px">
-    <h2>Repositories</h2>
-    <div id="repositories" class="list"></div>
-  </section>
-
-  <section class="card" style="margin-top:16px">
-    <h2>Pull requests</h2>
-    <div id="prs" class="list"></div>
-  </section>
-
-  <section class="card" style="margin-top:16px">
-    <h2>Recent reviews</h2>
-    <div id="reviews" class="list"></div>
-  </section>
-
+    </main>
+  </div>
 <script>
 const BOOTSTRAP_VIEW = ${safeScriptJson(initialView)};
 const BOOTSTRAP_ERROR = ${safeScriptJson(initialError)};
-const state = { view: null, busy: false };
+const state = { view: null, busy: false, selectedRepo: '', selectedPr: 0, showOverview: true };
 window.addEventListener('error', (event) => showFatal(event.message || String(event.error || 'Unknown script error')));
-window.addEventListener('unhandledrejection', (event) => showFatal(event.reason?.message || String(event.reason || 'Unhandled promise rejection')));
+window.addEventListener('unhandledrejection', (event) => showFatal(event.reason && event.reason.message ? event.reason.message : String(event.reason || 'Unhandled promise rejection')));
 const tokenInput = document.getElementById('token');
 const initialToken = new URLSearchParams(location.search).get('token') || localStorage.getItem('chatgpt-review-admin-token') || '';
 tokenInput.value = initialToken;
 if (initialToken) localStorage.setItem('chatgpt-review-admin-token', initialToken);
+let bootstrapConsumed = false;
 
-document.getElementById('save-token').onclick = async (event) => {
+document.getElementById('tokenForm').addEventListener('submit', (event) => {
   event.preventDefault();
   const token = tokenInput.value.trim();
-  if (!token) {
-    setAuthMessage('Paste the remote admin token first.', false);
-    return;
-  }
+  if (!token) return setAuthMessage('Paste the remote admin token first.', false);
   localStorage.setItem('chatgpt-review-admin-token', token);
-  setAuthMessage('Token saved locally. Reloading server-rendered remote admin state...', true);
-  location.href = '/admin?token=' + encodeURIComponent(token) + '&v=' + Date.now();
-};
-document.getElementById('reload').onclick = () => load();
-document.getElementById('github-auth').onclick = () => post('/admin/api/github/auth', { token: value('github-token') });
-document.getElementById('chatgpt-setup').onclick = () => post('/admin/api/chatgpt/setup', {});
-document.getElementById('repo-link').onclick = () => post('/admin/api/repositories/link', { repository: repoValue() });
-document.getElementById('repo-sync').onclick = () => post('/admin/api/repositories/sync-webhook', { repository: repoValue() });
-document.getElementById('repo-unlink').onclick = () => post('/admin/api/repositories/unlink', { repository: repoValue() });
-document.getElementById('refresh-prs').onclick = () => post('/admin/api/prs/refresh', { repository: value('repo') || undefined });
-document.getElementById('cloudflare-restart').onclick = () => post('/admin/api/cloudflare/restart', {});
-document.getElementById('build-app').onclick = async () => { const res = await post('/admin/api/system/build', {}, false); document.getElementById('operation-output').textContent = res.output || JSON.stringify(res, null, 2); await load(); };
-
-function value(id) { return document.getElementById(id).value.trim(); }
-function repoValue() { const repo = value('repo'); if (!repo) throw new Error('Repository is required.'); return repo; }
-function adminToken() { return (localStorage.getItem('chatgpt-review-admin-token') || tokenInput.value || '').trim(); }
-function withToken(path) {
-  const token = adminToken();
-  if (!token) return path;
-  const separator = path.includes('?') ? '&' : '?';
-  return path + separator + 'token=' + encodeURIComponent(token);
-}
-function authHeaders() { return { 'authorization': 'Bearer ' + adminToken(), 'content-type': 'application/json' }; }
-function setAuthMessage(message, ok) {
-  document.getElementById('auth-message').innerHTML = '<span class="' + (ok ? 'ok' : 'bad') + '">' + escapeHtml(message) + '</span>';
-}
-function showFatal(message) {
-  setAuthMessage(message, false);
-  const html = '<div class="bad">' + escapeHtml(message) + '</div>';
-  ['status', 'repositories', 'prs', 'reviews'].forEach((id) => { const element = document.getElementById(id); if (element) element.innerHTML = html; });
-  const output = document.getElementById('operation-output');
-  if (output) output.textContent = message;
-}
-async function api(path, options = {}) {
-  const response = await fetch(withToken(path), { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } });
-  const text = await response.text();
-  let payload = null;
-  try {
-    payload = text ? JSON.parse(text) : null;
-  } catch (_) {
-    payload = { error: text || 'Invalid JSON response' };
-  }
-  if (!response.ok) throw new Error(payload?.error || 'HTTP ' + response.status);
-  return payload;
-}
-async function post(path, body, refresh = true) {
-  try {
-    setBusy(true);
-    const payload = await api(path, { method: 'POST', body: JSON.stringify(body || {}) });
-    if (refresh) await load();
-    return payload;
-  } catch (error) {
-    alert(error.message || String(error));
-    throw error;
-  } finally {
-    setBusy(false);
-  }
-}
-let bootstrapConsumed = false;
-async function load() {
-  try {
-    setBusy(true);
-    if (BOOTSTRAP_ERROR && !bootstrapConsumed) {
-      setAuthMessage(BOOTSTRAP_ERROR, false);
-      document.getElementById('status').innerHTML = '<div class="bad">' + escapeHtml(BOOTSTRAP_ERROR) + '</div>';
-      bootstrapConsumed = true;
-      return;
-    }
-    if (BOOTSTRAP_VIEW && !bootstrapConsumed) {
-      state.view = BOOTSTRAP_VIEW;
-      bootstrapConsumed = true;
-      setAuthMessage(viewSummary(state.view), true);
-      render();
-      return;
-    }
-    if (!adminToken()) {
-      setAuthMessage('Paste the remote admin token, then Save token.', false);
-      document.getElementById('status').innerHTML = '<div class="muted">Waiting for remote admin token.</div>';
-      document.getElementById('repositories').innerHTML = '<div class="muted">Waiting for remote admin token.</div>';
-      document.getElementById('prs').innerHTML = '<div class="muted">Waiting for remote admin token.</div>';
-      document.getElementById('reviews').innerHTML = '<div class="muted">Waiting for remote admin token.</div>';
-      return;
-    }
-    state.view = await api('/admin/api/view');
-    setAuthMessage(viewSummary(state.view), true);
-    render();
-  } catch (error) {
-    const message = error.message || String(error);
-    setAuthMessage(message, false);
-    document.getElementById('status').innerHTML = '<div class="bad">' + escapeHtml(message) + '</div>';
-  } finally {
-    setBusy(false);
-  }
-}
-function setBusy(value) { state.busy = value; document.querySelectorAll('button').forEach((button) => button.disabled = value); }
-function render() {
-  const view = state.view;
-  const webhook = view.webhook || {};
-  const tunnel = view.tunnel || {};
-  document.getElementById('status').innerHTML = [
-    row('GitHub CLI', view.provider?.ghAuthenticated ? 'Ready' : view.provider?.detail, view.provider?.ghAuthenticated),
-    row('ChatGPT Web', view.chatgpt?.ready ? 'Ready' : 'Setup required', view.chatgpt?.ready),
-    row('Local webhook', webhook.listening ? webhook.localUrl : webhook.lastError || 'Stopped', webhook.listening),
-    row('Cloudflare tunnel', tunnel.running && tunnel.reachable ? tunnel.publicUrl : tunnel.lastError || 'Not ready', tunnel.running && tunnel.reachable),
-  ].join('');
-  const repos = view.repositories || [];
-  if (repos[0] && !value('repo')) document.getElementById('repo').value = repos[0].fullName;
-  document.getElementById('repositories').innerHTML = repos.map(renderRepository).join('') || '<div class="muted">No repositories linked.</div>';
-  document.getElementById('prs').innerHTML = (view.prs || []).map(renderPr).join('') || '<div class="muted">No open PRs loaded.</div>';
-  document.getElementById('reviews').innerHTML = (view.reviews || []).slice(0, 20).map(renderReview).join('') || '<div class="muted">No reviews yet.</div>';
-}
-function renderRepository(repo) {
-  const hook = repo.webhook || {};
-  const conversations = repo.chatgptPrConversations || [];
-  const project = repo.chatgptProjectUrl ? '<a href="' + escapeAttr(repo.chatgptProjectUrl) + '" target="_blank">ChatGPT Project</a>' : '<span class="muted">No ChatGPT Project yet</span>';
-  return '<div class="item"><strong>' + escapeHtml(repo.fullName) + '</strong> <span class="pill ' + (repo.enabled ? 'ok' : 'bad') + '">' + (repo.enabled ? 'enabled' : 'disabled') + '</span>'
-    + '<div class="muted">Webhook: ' + escapeHtml(hook.status || 'not synced') + (hook.targetUrl ? ' · ' + escapeHtml(hook.targetUrl) : '') + '</div>'
-    + '<div class="muted">ChatGPT: ' + project + ' · PR conversations: ' + conversations.length + '</div>'
-    + '<div class="row"><button data-action="refresh-prs" data-repository="' + escapeAttr(repo.fullName) + '">Refresh PRs</button><button data-action="sync-webhook" data-repository="' + escapeAttr(repo.fullName) + '">Sync webhook</button></div></div>';
-}
-function viewSummary(view) { return 'Token accepted. Loaded ' + ((view.repositories || []).length) + ' repo(s), ' + ((view.prs || []).length) + ' PR(s), ' + ((view.reviews || []).length) + ' review(s).'; }
-function row(label, detail, ok) { return '<div class="item"><strong>' + escapeHtml(label) + '</strong> <span class="pill ' + (ok ? 'ok' : 'bad') + '">' + (ok ? 'ready' : 'attention') + '</span><div class="muted">' + escapeHtml(detail || '') + '</div></div>'; }
-function renderPr(pr) {
-  return '<div class="item"><strong>#' + pr.number + ' ' + escapeHtml(pr.title) + '</strong><div class="muted">' + escapeHtml(pr.repository + ' · ' + pr.headBranch + ' → ' + pr.baseBranch) + '</div><div class="row"><button data-action="run-review" data-repository="' + escapeAttr(pr.repository) + '" data-pr-number="' + String(pr.number) + '" data-force="false">Review</button><button data-action="run-review" data-repository="' + escapeAttr(pr.repository) + '" data-pr-number="' + String(pr.number) + '" data-force="true">Re-review head</button><a href="' + escapeAttr(pr.url) + '" target="_blank">Open PR</a></div></div>';
-}
-function renderReview(review) {
-  const canCancel = review.status === 'running' || review.status === 'queued';
-  return '<div class="item"><strong>' + escapeHtml(review.trigger || 'manual') + ' · ' + escapeHtml(review.phase) + '</strong> <span class="pill">' + escapeHtml(review.status) + '</span><div class="muted">' + escapeHtml(review.repository + ' PR #' + review.prNumber + ' · ' + String(review.headSha || '').slice(0, 10)) + '</div>' + (review.error ? '<div class="bad">' + escapeHtml(review.error) + '</div>' : '') + '<div class="row">' + (canCancel ? '<button class="danger" data-action="cancel-review" data-review-id="' + escapeAttr(review.id) + '">Cancel</button>' : '') + '</div></div>';
-}
+  location.href = '/admin/?token=' + encodeURIComponent(token) + '&v=' + Date.now();
+});
+document.getElementById('reload').addEventListener('click', () => { bootstrapConsumed = true; void load(true); });
 document.addEventListener('click', (event) => {
   const element = event.target instanceof Element ? event.target.closest('[data-action]') : null;
   if (!element) return;
   const action = element.getAttribute('data-action') || '';
   const repository = element.getAttribute('data-repository') || '';
+  const prNumber = Number(element.getAttribute('data-pr-number') || '0');
   try {
-    if (action === 'refresh-prs') {
-      document.getElementById('repo').value = repository;
-      void post('/admin/api/prs/refresh', { repository });
+    if (action === 'select-repo') {
+      state.selectedRepo = repository;
+      state.showOverview = false;
+      const firstPr = prsForRepo(repository)[0];
+      state.selectedPr = firstPr ? firstPr.number : 0;
+      render();
+    } else if (action === 'select-pr') {
+      state.selectedRepo = repository;
+      state.selectedPr = prNumber;
+      state.showOverview = false;
+      render();
+    } else if (action === 'show-overview') {
+      state.showOverview = true;
+      render();
+    } else if (action === 'refresh-prs') {
+      void post('/admin/api/prs/refresh', { repository: repository || undefined });
     } else if (action === 'sync-webhook') {
-      document.getElementById('repo').value = repository;
-      void post('/admin/api/repositories/sync-webhook', { repository });
+      void post('/admin/api/repositories/sync-webhook', { repository: repository || repoInputValue() });
+    } else if (action === 'link-repo') {
+      void post('/admin/api/repositories/link', { repository: repoInputValue() });
+    } else if (action === 'unlink-repo') {
+      void post('/admin/api/repositories/unlink', { repository: repository || repoInputValue() });
     } else if (action === 'run-review') {
-      const prNumber = Number(element.getAttribute('data-pr-number'));
       void post('/admin/api/reviews/run', { repository, prNumber, force: element.getAttribute('data-force') === 'true' });
     } else if (action === 'cancel-review') {
       void post('/admin/api/reviews/cancel', { reviewId: element.getAttribute('data-review-id') || '' });
+    } else if (action === 'github-auth') {
+      void post('/admin/api/github/auth', { token: inputValue('github-token') });
+    } else if (action === 'chatgpt-setup') {
+      void post('/admin/api/chatgpt/setup', {});
+    } else if (action === 'cloudflare-restart') {
+      void post('/admin/api/cloudflare/restart', {});
+    } else if (action === 'build-app') {
+      void buildApp();
     }
   } catch (error) {
     alert(error.message || String(error));
   }
 });
-function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch])); }
+function adminToken() { return (localStorage.getItem('chatgpt-review-admin-token') || tokenInput.value || '').trim(); }
+function inputValue(id) { const node = document.getElementById(id); return node && 'value' in node ? String(node.value).trim() : ''; }
+function repoInputValue() { const repo = inputValue('repoInput'); if (!repo) throw new Error('Repository is required.'); return repo; }
+function withToken(path) { const token = adminToken(); if (!token) return path; return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token); }
+function authHeaders() { return { authorization: 'Bearer ' + adminToken(), 'content-type': 'application/json' }; }
+async function api(path, options) {
+  const response = await fetch(withToken(path), Object.assign({}, options || {}, { headers: Object.assign({}, authHeaders(), (options && options.headers) || {}) }));
+  const text = await response.text();
+  let payload = null;
+  try { payload = text ? JSON.parse(text) : null; } catch (_) { payload = { error: text || 'Invalid JSON response' }; }
+  if (!response.ok) throw new Error((payload && payload.error) || 'HTTP ' + response.status);
+  return payload;
+}
+async function post(path, body, refresh) {
+  try {
+    setBusy(true);
+    const payload = await api(path, { method: 'POST', body: JSON.stringify(body || {}) });
+    if (refresh !== false) await load(true);
+    return payload;
+  } catch (error) {
+    showNotice(error.message || String(error), true);
+    throw error;
+  } finally {
+    setBusy(false);
+  }
+}
+async function buildApp() {
+  const result = await post('/admin/api/system/build', {}, false);
+  showNotice((result && result.output) || 'Build finished.', !(result && result.ok));
+  await load(true);
+}
+async function load(forceApi) {
+  try {
+    setBusy(true);
+    if (BOOTSTRAP_ERROR && !bootstrapConsumed && !forceApi) {
+      bootstrapConsumed = true;
+      setAuthMessage(BOOTSTRAP_ERROR, false);
+      return renderShellEmpty(BOOTSTRAP_ERROR);
+    }
+    if (BOOTSTRAP_VIEW && !bootstrapConsumed && !forceApi) {
+      state.view = BOOTSTRAP_VIEW;
+      bootstrapConsumed = true;
+      setAuthMessage(viewSummary(state.view), true);
+      ensureSelection();
+      render();
+      return;
+    }
+    bootstrapConsumed = true;
+    if (!adminToken()) {
+      setAuthMessage('Paste the remote admin token, then Save.', false);
+      return renderShellEmpty('Waiting for remote admin token.');
+    }
+    state.view = await api('/admin/api/view');
+    setAuthMessage(viewSummary(state.view), true);
+    ensureSelection();
+    render();
+  } catch (error) {
+    const message = error.message || String(error);
+    setAuthMessage(message, false);
+    renderShellEmpty(message);
+  } finally {
+    setBusy(false);
+  }
+}
+function setBusy(value) { state.busy = value; document.querySelectorAll('button').forEach((button) => { button.disabled = value; }); }
+function setAuthMessage(message, ok) { document.getElementById('auth-message').innerHTML = '<span class="' + (ok ? 'ok' : 'bad') + '">' + escapeHtml(message) + '</span>'; }
+function showNotice(message, error) { const node = document.getElementById('notice'); node.className = 'notice' + (error ? ' error' : ''); node.textContent = message; setTimeout(() => { node.classList.add('hidden'); }, 7000); }
+function showFatal(message) { setAuthMessage(message, false); renderShellEmpty(message); }
+function renderShellEmpty(message) {
+  document.getElementById('repositories').innerHTML = '<div class="empty">' + escapeHtml(message) + '</div>';
+  document.getElementById('prs').innerHTML = '<div class="empty">' + escapeHtml(message) + '</div>';
+  document.getElementById('detail').innerHTML = '<div class="review-list" style="padding-top:28px"><div class="review-item"><div class="review-error">' + escapeHtml(message) + '</div></div></div>';
+}
+function ensureSelection() {
+  const repos = repositories();
+  if (!state.selectedRepo && repos[0]) state.selectedRepo = repos[0].fullName;
+  if (!state.selectedPr) {
+    const firstPr = prsForRepo(state.selectedRepo)[0] || prs()[0];
+    if (firstPr) state.selectedPr = firstPr.number;
+  }
+}
+function render() {
+  if (!state.view) return;
+  renderSidebar();
+  renderPrList();
+  if (state.showOverview) renderOverview(); else renderPrDetail();
+}
+function repositories() { return (state.view && state.view.repositories) || []; }
+function prs() { return (state.view && state.view.prs) || []; }
+function reviews() { return (state.view && state.view.reviews) || []; }
+function prsForRepo(repository) { return prs().filter((pr) => !repository || pr.repository === repository); }
+function reviewsFor(repository, prNumber) { return reviews().filter((review) => review.repository === repository && Number(review.prNumber) === Number(prNumber)); }
+function renderSidebar() {
+  const repos = repositories();
+  document.getElementById('repoCount').textContent = String(repos.length);
+  document.getElementById('reviewCount').textContent = String(reviews().length);
+  document.getElementById('repositories').innerHTML = repos.map((repo) => {
+    const health = repo.webhook && repo.webhook.status === 'healthy' ? 'success' : repo.enabled ? 'warning' : 'danger';
+    const selected = repo.fullName === state.selectedRepo && !state.showOverview;
+    const prCount = prsForRepo(repo.fullName).length;
+    return '<button class="repository-nav-item ' + (selected ? 'selected' : '') + '" data-action="select-repo" data-repository="' + escapeAttr(repo.fullName) + '" type="button"><span class="repository-active-accent"></span><span class="repository-icon">▱</span><span class="repository-nav-copy"><span class="repository-nav-name">' + escapeHtml(repo.fullName) + '</span><span class="repository-nav-meta">' + prCount + ' open PRs</span></span><span class="repo-health ' + health + '"></span></button>';
+  }).join('') || '<div class="empty">No repositories linked.</div>';
+  document.getElementById('sidebarReviews').innerHTML = reviews().slice(0, 8).map((review) => {
+    const selected = review.repository === state.selectedRepo && Number(review.prNumber) === Number(state.selectedPr) && !state.showOverview;
+    return '<button class="repository-nav-item ' + (selected ? 'selected' : '') + '" data-action="select-pr" data-repository="' + escapeAttr(review.repository) + '" data-pr-number="' + String(review.prNumber) + '" type="button"><span class="repository-active-accent"></span><span class="repository-icon">#</span><span class="repository-nav-copy"><span class="repository-nav-name">PR #' + String(review.prNumber) + ' · ' + escapeHtml(review.phase || review.status) + '</span><span class="repository-nav-meta">' + escapeHtml(review.status || '') + '</span></span><span class="repo-health ' + statusTone(review.status) + '"></span></button>';
+  }).join('') || '<div class="empty">No reviews yet.</div>';
+}
+function renderPrList() {
+  const list = prsForRepo(state.selectedRepo);
+  document.getElementById('prCount').textContent = String(list.length || prs().length);
+  const source = list.length ? list : prs();
+  document.getElementById('prs').innerHTML = source.map((pr) => {
+    const selected = pr.repository === state.selectedRepo && Number(pr.number) === Number(state.selectedPr) && !state.showOverview;
+    const latest = reviewsFor(pr.repository, pr.number)[0];
+    return '<button class="pr-nav-item ' + (selected ? 'selected' : '') + '" data-action="select-pr" data-repository="' + escapeAttr(pr.repository) + '" data-pr-number="' + String(pr.number) + '" type="button"><span class="pr-nav-top"><span class="pr-number">#' + String(pr.number) + '</span>' + (latest ? badge(latest.status, statusTone(latest.status)) : '<span class="repository-nav-meta">unreviewed</span>') + '</span><span class="pr-nav-title">' + escapeHtml(pr.title) + '</span><span class="pr-nav-meta">' + escapeHtml(pr.headBranch + ' → ' + pr.baseBranch) + ' · ' + String(pr.changedFiles || 0) + ' files</span></button>';
+  }).join('') || '<div class="empty">No open PRs loaded.</div>';
+}
+function renderOverview() {
+  const view = state.view;
+  const webhook = view.webhook || {};
+  const tunnel = view.tunnel || {};
+  const provider = view.provider || {};
+  const chatgpt = view.chatgpt || {};
+  document.getElementById('detail').innerHTML = '<header class="pr-detail-header"><div class="pr-detail-title-group"><div class="mono-label">REMOTE ADMIN</div><h2>ChatGPT Review workspace</h2><p class="pr-detail-meta">Manage the VPS worker with the same navigation model as the desktop app.</p></div><div class="workspace-actions"><button class="button secondary" data-action="refresh-prs">Refresh PRs</button><button class="button" data-action="chatgpt-setup">Open ChatGPT setup</button></div></header>'
+    + '<div class="history-heading"><div><p class="column-eyebrow">STATUS</p><h3>Connections</h3></div><span class="count-pill">' + String(repositories().length) + '</span></div>'
+    + '<div class="overview-grid"><section class="panel-card"><h3>Connection status</h3><div class="connection-list">'
+    + connectionRow('GitHub CLI', provider.ghAuthenticated ? 'Ready' : provider.detail || 'Not ready', provider.ghAuthenticated)
+    + connectionRow('ChatGPT Web', chatgpt.ready ? 'Ready' : 'Setup required', chatgpt.ready)
+    + connectionRow('Local webhook', webhook.listening ? webhook.localUrl : webhook.lastError || 'Stopped', webhook.listening)
+    + connectionRow('Cloudflare tunnel', tunnel.running && tunnel.reachable ? tunnel.publicUrl : tunnel.lastError || 'Not ready', tunnel.running && tunnel.reachable)
+    + '</div></section>'
+    + '<section class="panel-card"><h3>Repository</h3><p>Link repositories and keep GitHub webhook configuration synchronized.</p><div class="setting-grid"><input id="repoInput" placeholder="owner/repo" value="' + escapeAttr(state.selectedRepo || '') + '" /><button class="button" data-action="link-repo">Link</button></div><div class="button-row" style="margin-top:8px"><button class="button secondary" data-action="sync-webhook">Sync webhook</button><button class="button secondary" data-action="refresh-prs">Refresh PRs</button><button class="button danger" data-action="unlink-repo">Unlink</button></div></section>'
+    + '<section class="panel-card"><h3>GitHub setup</h3><p>Paste a GitHub token once. The app passes it to gh auth login --with-token.</p><div class="setting-grid"><input id="github-token" type="password" placeholder="GitHub token" /><button class="button" data-action="github-auth">Authenticate gh</button></div></section>'
+    + '<section class="panel-card"><h3>Operations</h3><p>Build or restart worker-side services from the browser.</p><div class="button-row"><button class="button secondary" data-action="cloudflare-restart">Restart Cloudflare tunnel</button><button class="button secondary" data-action="build-app">Run npm build</button></div></section></div>';
+}
+function renderPrDetail() {
+  const pr = prs().find((item) => item.repository === state.selectedRepo && Number(item.number) === Number(state.selectedPr));
+  if (!pr) return renderOverview();
+  const items = reviewsFor(pr.repository, pr.number);
+  document.getElementById('detail').innerHTML = '<header class="pr-detail-header"><div class="pr-detail-title-group"><div class="mono-label">PR #' + String(pr.number) + '</div><h2>' + escapeHtml(pr.title) + '</h2><p class="pr-detail-meta">' + escapeHtml(pr.repository + ' · ' + pr.headBranch + ' → ' + pr.baseBranch + ' · ' + String(pr.changedFiles || 0) + ' changed files') + '</p></div><div class="workspace-actions"><a class="button secondary" href="' + escapeAttr(pr.url) + '" target="_blank">Open PR</a><button class="button" data-action="run-review" data-repository="' + escapeAttr(pr.repository) + '" data-pr-number="' + String(pr.number) + '" data-force="false">Review now</button><button class="button secondary" data-action="run-review" data-repository="' + escapeAttr(pr.repository) + '" data-pr-number="' + String(pr.number) + '" data-force="true">Re-review head</button></div></header><div class="history-heading"><div><p class="column-eyebrow">HISTORY</p><h3>Review runs</h3></div><span class="count-pill">' + String(items.length) + '</span></div><div class="review-list">' + (items.map(renderReview).join('') || '<div class="review-item"><div class="review-summary">No reviews yet.</div></div>') + '</div>';
+}
+function renderReview(review) {
+  const canCancel = review.status === 'running' || review.status === 'queued';
+  return '<article class="review-item"><div class="review-head"><div><div class="review-title">' + escapeHtml((review.trigger || 'manual') + ' · ' + (review.phase || review.status)) + '</div><div class="review-meta">' + escapeHtml(String(review.headSha || '').slice(0, 12) + ' · ' + (review.startedAt || '')) + '</div></div>' + badge(review.status, statusTone(review.status)) + '</div><div class="review-body"><div class="review-meta">Jira ' + escapeHtml((review.jiraKeys || []).join(', ') || 'none') + ' · ' + escapeHtml(review.jiraStatus || 'pending') + '</div>' + (review.error ? '<div class="review-error">' + escapeHtml(review.error) + '</div>' : '<div class="review-summary">' + (review.status === 'running' ? 'Review is in progress. State updates will appear automatically.' : 'Review completed or waiting for details.') + '</div>') + '<div class="button-row">' + (review.conversationUrl ? '<a class="button secondary" href="' + escapeAttr(review.conversationUrl) + '" target="_blank">Open Chat</a>' : '') + (canCancel ? '<button class="button danger" data-action="cancel-review" data-review-id="' + escapeAttr(review.id) + '">Cancel review</button>' : '') + '</div></div></article>';
+}
+function connectionRow(label, detail, ok) { return '<div class="connection-item"><span class="connection-copy"><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(detail || '') + '</span></span>' + badge(ok ? 'ready' : 'attention', ok ? 'success' : 'danger') + '</div>'; }
+function badge(text, tone) { return '<span class="badge ' + (tone || '') + '">' + escapeHtml(text || '') + '</span>'; }
+function statusTone(status) { if (status === 'completed') return 'success'; if (status === 'running' || status === 'queued') return 'info'; if (status === 'failed' || status === 'blocked') return 'danger'; if (status === 'cancelled') return 'warning'; return 'warning'; }
+function viewSummary(view) { return 'Token accepted. Loaded ' + ((view.repositories || []).length) + ' repo(s), ' + ((view.prs || []).length) + ' PR(s), ' + ((view.reviews || []).length) + ' review(s).'; }
+function escapeHtml(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch])); }
 function escapeAttr(value) { return escapeHtml(value).replace(/\`/g, '&#096;'); }
-load();
-setInterval(load, 5000);
+void load(false);
+setInterval(() => { void load(true); }, 5000);
 </script>
 </body>
 </html>`;
