@@ -52,7 +52,10 @@ export function createRemoteAdminHandler(dependencies: RemoteAdminDependencies):
     if (!requestUrl.pathname.startsWith("/admin")) return false;
     try {
       if (request.method === "GET" && (requestUrl.pathname === "/admin" || requestUrl.pathname === "/admin/")) {
-        writeHtml(response, renderAdminHtml());
+        const suppliedToken = bearerToken(request) || requestUrl.searchParams.get("token") || "";
+        const initialView = suppliedToken && suppliedToken === dependencies.token ? await dependencies.getView() : null;
+        const initialError = suppliedToken && suppliedToken !== dependencies.token ? "Remote admin token is invalid." : "";
+        writeHtml(response, renderAdminHtml(initialView, initialError));
         return true;
       }
       if (!requestUrl.pathname.startsWith("/admin/api/")) {
@@ -208,7 +211,16 @@ function safeError(error: unknown): string {
   return error instanceof Error && error.message ? error.message.replace(/[\r\n]+/g, " ").slice(0, 1000) : "unknown error";
 }
 
-function renderAdminHtml(): string {
+function safeScriptJson(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+function renderAdminHtml(initialView: AppView | null = null, initialError = ""): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -295,6 +307,11 @@ function renderAdminHtml(): string {
   </main>
 
   <section class="card" style="margin-top:16px">
+    <h2>Repositories</h2>
+    <div id="repositories" class="list"></div>
+  </section>
+
+  <section class="card" style="margin-top:16px">
     <h2>Pull requests</h2>
     <div id="prs" class="list"></div>
   </section>
@@ -305,6 +322,8 @@ function renderAdminHtml(): string {
   </section>
 
 <script>
+const BOOTSTRAP_VIEW = ${safeScriptJson(initialView)};
+const BOOTSTRAP_ERROR = ${JSON.stringify(initialError)};
 const state = { view: null, busy: false };
 const tokenInput = document.getElementById('token');
 const initialToken = new URLSearchParams(location.search).get('token') || localStorage.getItem('chatgpt-review-admin-token') || '';
@@ -364,16 +383,33 @@ async function post(path, body, refresh = true) {
     setBusy(false);
   }
 }
+let bootstrapConsumed = false;
 async function load() {
   try {
     setBusy(true);
+    if (BOOTSTRAP_ERROR && !bootstrapConsumed) {
+      setAuthMessage(BOOTSTRAP_ERROR, false);
+      document.getElementById('status').innerHTML = '<div class="bad">' + escapeHtml(BOOTSTRAP_ERROR) + '</div>';
+      bootstrapConsumed = true;
+      return;
+    }
+    if (BOOTSTRAP_VIEW && !bootstrapConsumed) {
+      state.view = BOOTSTRAP_VIEW;
+      bootstrapConsumed = true;
+      setAuthMessage('Token accepted. GitHub, ChatGPT, repositories, PRs and reviews loaded from the worker.', true);
+      render();
+      return;
+    }
     if (!adminToken()) {
       setAuthMessage('Paste the remote admin token, then Save token.', false);
       document.getElementById('status').innerHTML = '<div class="muted">Waiting for remote admin token.</div>';
+      document.getElementById('repositories').innerHTML = '<div class="muted">Waiting for remote admin token.</div>';
+      document.getElementById('prs').innerHTML = '<div class="muted">Waiting for remote admin token.</div>';
+      document.getElementById('reviews').innerHTML = '<div class="muted">Waiting for remote admin token.</div>';
       return;
     }
     state.view = await api('/admin/api/view');
-    setAuthMessage('Token accepted. Remote admin state loaded.', true);
+    setAuthMessage('Token accepted. GitHub, ChatGPT, repositories, PRs and reviews synced from the worker.', true);
     render();
   } catch (error) {
     const message = error.message || String(error);
@@ -396,8 +432,18 @@ function render() {
   ].join('');
   const repos = view.repositories || [];
   if (repos[0] && !value('repo')) document.getElementById('repo').value = repos[0].fullName;
+  document.getElementById('repositories').innerHTML = repos.map(renderRepository).join('') || '<div class="muted">No repositories linked.</div>';
   document.getElementById('prs').innerHTML = (view.prs || []).map(renderPr).join('') || '<div class="muted">No open PRs loaded.</div>';
   document.getElementById('reviews').innerHTML = (view.reviews || []).slice(0, 20).map(renderReview).join('') || '<div class="muted">No reviews yet.</div>';
+}
+function renderRepository(repo) {
+  const hook = repo.webhook || {};
+  const conversations = repo.chatgptPrConversations || [];
+  const project = repo.chatgptProjectUrl ? '<a href="' + escapeAttr(repo.chatgptProjectUrl) + '" target="_blank">ChatGPT Project</a>' : '<span class="muted">No ChatGPT Project yet</span>';
+  return '<div class="item"><strong>' + escapeHtml(repo.fullName) + '</strong> <span class="pill ' + (repo.enabled ? 'ok' : 'bad') + '">' + (repo.enabled ? 'enabled' : 'disabled') + '</span>'
+    + '<div class="muted">Webhook: ' + escapeHtml(hook.status || 'not synced') + (hook.targetUrl ? ' · ' + escapeHtml(hook.targetUrl) : '') + '</div>'
+    + '<div class="muted">ChatGPT: ' + project + ' · PR conversations: ' + conversations.length + '</div>'
+    + '<div class="row"><button onclick="document.getElementById(\'repo\').value=\'' + escapeAttr(repo.fullName) + '\'; post(\'/admin/api/prs/refresh\', { repository: \'' + escapeAttr(repo.fullName) + '\' })">Refresh PRs</button><button onclick="document.getElementById(\'repo\').value=\'' + escapeAttr(repo.fullName) + '\'; post(\'/admin/api/repositories/sync-webhook\', { repository: \'' + escapeAttr(repo.fullName) + '\' })">Sync webhook</button></div></div>';
 }
 function row(label, detail, ok) { return '<div class="item"><strong>' + escapeHtml(label) + '</strong> <span class="pill ' + (ok ? 'ok' : 'bad') + '">' + (ok ? 'ready' : 'attention') + '</span><div class="muted">' + escapeHtml(detail || '') + '</div></div>'; }
 function renderPr(pr) {
