@@ -121,9 +121,10 @@ describe("review conversation cleanup", () => {
     },
   );
 
-  it("marks an otherwise completed review failed when conversation cleanup still fails after retries", async () => {
+  it("preserves the completed review outcome when conversation cleanup still fails after retries", async () => {
     let attempts = 0;
     const persisted: ReviewRecord[] = [];
+    const events: Array<{ type: string; message: string }> = [];
     const engine = new ReviewEngine({
       state: {
         getPullRequestChatConversation: () => "https://chatgpt.com/c/main-review",
@@ -143,16 +144,20 @@ describe("review conversation cleanup", () => {
         },
       } as any,
       webhookSecret: "secret",
+      onEvent: (event: any) => events.push({ type: event.type, message: event.message }),
     });
 
     const record = reviewRecord();
     await (engine as any).cleanupReviewConversations(record, new Set());
 
     expect(attempts).toBe(3);
-    expect(record.status).toBe("failed");
-    expect(record.phase).toBe("failed");
-    expect(record.error).toMatch(/conversation cleanup failed/i);
+    expect(record.status).toBe("completed");
+    expect(record.phase).toBe("completed");
+    expect(record.error).toBeUndefined();
     expect(record.conversationUrl).toBe("https://chatgpt.com/c/main-review");
-    expect(persisted.at(-1)?.status).toBe("failed");
+    expect(persisted.at(-1)?.status).toBe("completed");
+    expect(events.at(-1)?.type).toBe("progress");
+    expect(events.at(-1)?.message).toMatch(/cleanup incomplete/i);
+    expect(events.at(-1)?.message).toMatch(/1\/1 conversation/);
   });
 });

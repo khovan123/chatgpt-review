@@ -1343,23 +1343,69 @@ async function deleteConversationFromUi(contents: WebContents, targetUrl: string
   })()`, "selecting Delete for the ChatGPT conversation");
   if (!deleteClicked) throw new Error("ChatGPT conversation Delete action was not found.");
 
-  await delay(250);
-  const confirmed = await executeJavaScriptSafe<boolean>(contents, `(() => {
-    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [data-testid*="modal"], [data-testid*="dialog"]'));
-    const dialog = dialogs.find((node) => node instanceof HTMLElement && node.getClientRects().length > 0);
-    if (!(dialog instanceof HTMLElement)) return false;
-    const buttons = Array.from(dialog.querySelectorAll('button'));
-    const confirm = buttons.find((node) => {
-      if (!(node instanceof HTMLButtonElement) || node.disabled) return false;
-      const testId = (node.getAttribute('data-testid') || '').toLowerCase();
-      const text = (node.textContent || node.getAttribute('aria-label') || '').trim().toLowerCase();
-      return testId.includes('delete') || /^(delete|delete chat|delete conversation|xóa|xóa cuộc trò chuyện)$/.test(text);
-    });
-    if (!(confirm instanceof HTMLButtonElement)) return false;
-    confirm.click();
-    return true;
-  })()`, "confirming ChatGPT conversation deletion");
-  if (!confirmed) throw new Error("ChatGPT conversation deletion confirmation was not found.");
+  const confirmDeadline = Date.now() + 5_000;
+  let confirmed = false;
+  while (Date.now() < confirmDeadline && !confirmed) {
+    await delay(150);
+    const current = safeConversationUrl(safeWebContentsUrl(contents));
+    if (!current || current !== targetUrl) return;
+
+    confirmed = await executeJavaScriptSafe<boolean>(contents, `(() => {
+      const visible = (node) => node instanceof HTMLElement && node.getClientRects().length > 0;
+      const label = (node) => [
+        node.getAttribute('data-testid') || '',
+        node.getAttribute('aria-label') || '',
+        node.getAttribute('title') || '',
+        node.textContent || '',
+      ].join(' ').trim().toLowerCase();
+      const isDeleteConfirm = (node) => {
+        if (!(node instanceof HTMLButtonElement) || node.disabled || !visible(node)) return false;
+        const text = label(node);
+        if (/cancel|keep|nevermind|dismiss|hủy|giữ/.test(text)) return false;
+        return /delete.*(confirm|conversation|chat)|confirm.*delete/.test(text)
+          || /^(delete|delete chat|delete conversation|xóa|xóa chat|xóa cuộc trò chuyện|xác nhận xóa)$/.test(text)
+          || ((node.getAttribute('data-testid') || '').toLowerCase().includes('delete')
+            && (node.getAttribute('data-testid') || '').toLowerCase().includes('confirm'));
+      };
+
+      const overlaySelectors = [
+        '[role="alertdialog"]',
+        '[role="dialog"]',
+        '[data-testid*="modal"]',
+        '[data-testid*="dialog"]',
+        '[data-state="open"]',
+      ];
+      for (const selector of overlaySelectors) {
+        const overlays = Array.from(document.querySelectorAll(selector)).filter(visible);
+        for (const overlay of overlays) {
+          const confirm = Array.from(overlay.querySelectorAll('button')).find(isDeleteConfirm);
+          if (confirm instanceof HTMLButtonElement) {
+            confirm.click();
+            return true;
+          }
+        }
+      }
+
+      // ChatGPT occasionally renders destructive confirmations in a portal
+      // without role=dialog. After the menu item was clicked, the original menu
+      // closes, so a remaining visible exact Delete button is the confirmation.
+      const globalConfirm = Array.from(document.querySelectorAll('button')).find((node) => {
+        if (!isDeleteConfirm(node)) return false;
+        const role = node.getAttribute('role') || node.parentElement?.getAttribute('role') || '';
+        return role !== 'menuitem' && role !== 'option';
+      });
+      if (globalConfirm instanceof HTMLButtonElement) {
+        globalConfirm.click();
+        return true;
+      }
+      return false;
+    })()`, "confirming ChatGPT conversation deletion");
+  }
+  if (!confirmed) {
+    const current = safeConversationUrl(safeWebContentsUrl(contents));
+    if (!current || current !== targetUrl) return;
+    throw new Error("ChatGPT conversation deletion confirmation was not found after waiting for the confirmation UI.");
+  }
 
   const deletedDeadline = Date.now() + 15_000;
   while (Date.now() < deletedDeadline) {

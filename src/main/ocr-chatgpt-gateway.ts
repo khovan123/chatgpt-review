@@ -53,14 +53,18 @@ export class OcrChatGptGateway {
   private activeRequests = 0;
   private token = "";
   private readonly seenToolResultDigests = new Set<string>();
+  private sharedConversationUrl: string | undefined;
 
   constructor(
     private readonly chatgpt: ChatGptWebDriver,
     private readonly projectUrl: string,
     private readonly onProgress?: (message: string) => void,
     private readonly parentTaskId = "",
-    private readonly onConversation?: (conversationUrl: string) => void,
-  ) {}
+    private readonly onConversation?: (conversationUrl: string) => Promise<void> | void,
+    initialConversationUrl?: string,
+  ) {
+    this.sharedConversationUrl = initialConversationUrl;
+  }
 
   async start(): Promise<OcrChatGptGatewayBinding> {
     if (this.server) return this.binding();
@@ -165,12 +169,17 @@ export class OcrChatGptGateway {
     this.onProgress?.(
       `OCR agent LLM turn via ChatGPT Web (mode=${mode}, ${tools.length} tool(s), ${body.messages?.length ?? 0} message(s), ${promptBytes} prompt byte(s), affinity ${shortAffinity(affinity)}).`,
     );
-    await this.chatgpt.startTask(taskId, this.projectUrl);
+    const taskStart = await this.chatgpt.startTask(taskId, this.projectUrl, this.sharedConversationUrl);
+    if (taskStart.fallbackToNewConversation) {
+      this.sharedConversationUrl = undefined;
+    } else if (taskStart.conversationUrl) {
+      await this.rememberConversation(taskStart.conversationUrl);
+    }
     try {
-      const web = await this.chatgpt.send(taskId, prompt, (conversationUrl) => {
-        this.onConversation?.(conversationUrl);
+      const web = await this.chatgpt.send(taskId, prompt, async (conversationUrl) => {
+        await this.rememberConversation(conversationUrl);
       });
-      this.onConversation?.(web.conversationUrl);
+      await this.rememberConversation(web.conversationUrl);
       const assistant = tools.length
         ? parseToolCallingResponse(web.text, tools)
         : { content: web.text, toolCalls: [] as NativeToolCall[] };
@@ -189,6 +198,12 @@ export class OcrChatGptGateway {
     } finally {
       this.chatgpt.finishTask(taskId);
     }
+  }
+
+  private async rememberConversation(conversationUrl: string): Promise<void> {
+    if (!conversationUrl || this.sharedConversationUrl === conversationUrl) return;
+    this.sharedConversationUrl = conversationUrl;
+    await this.onConversation?.(conversationUrl);
   }
 
   private authorized(request: IncomingMessage): boolean {

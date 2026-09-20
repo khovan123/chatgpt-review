@@ -58,6 +58,58 @@ describe("OCR ChatGPT Web OpenAI gateway", () => {
   });
 
 
+  it("reuses one PR conversation across OCR completion rounds", async () => {
+    const startConversationUrls: Array<string | undefined> = [];
+    const announced: string[] = [];
+    const sharedUrl = "https://chatgpt.com/c/shared-pr-review";
+    const fakeDriver = {
+      startTask: async (_taskId: string, _projectUrl: string, conversationUrl?: string) => {
+        startConversationUrls.push(conversationUrl);
+        return {
+          conversationUrl: conversationUrl ?? null,
+          fallbackToNewConversation: false,
+        };
+      },
+      send: async (_taskId: string, _prompt: string, onConversationUrl?: (url: string) => Promise<void> | void) => {
+        await onConversationUrl?.(sharedUrl);
+        return {
+          text: "Review complete.",
+          conversationUrl: sharedUrl,
+        };
+      },
+      finishTask: () => undefined,
+    };
+    const gateway = new OcrChatGptGateway(
+      fakeDriver as any,
+      "https://chatgpt.com/g/g-p-fake/project",
+      undefined,
+      "review_0123456789abcdef",
+      (url) => announced.push(url),
+    );
+    const binding = await gateway.start();
+    try {
+      for (let index = 0; index < 2; index += 1) {
+        const response = await fetch(`${binding.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${binding.token}`,
+          },
+          body: JSON.stringify({
+            model: binding.model,
+            messages: [{ role: "user", content: `review round ${index + 1}` }],
+          }),
+        });
+        expect(response.status).toBe(200);
+      }
+
+      expect(startConversationUrls).toEqual([undefined, sharedUrl]);
+      expect(announced).toEqual([sharedUrl]);
+    } finally {
+      await gateway.stop();
+    }
+  });
+
   it("streams deduplicated OCR tool results into review progress with secret redaction", async () => {
     const progress: string[] = [];
     const fakeDriver = {

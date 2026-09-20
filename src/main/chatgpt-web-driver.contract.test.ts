@@ -24,6 +24,9 @@ describe("ChatGPT Web review-session lifecycle", () => {
     expect(driver).toContain("destroyTaskWindow(taskId)");
     expect(driver).toContain("async deleteConversation(conversationUrl: string)");
     expect(driver).toContain("deleteConversationFromUi(contents, target)");
+    expect(driver).toContain('[role="alertdialog"]');
+    expect(driver).toContain("confirmDeadline");
+    expect(driver).toContain("portal");
     expect(driver).toContain("executeJavaScriptSafe");
     expect(driver).toContain("contents.isDestroyed()");
     expect(driver).not.toContain(".catch(() => emptySnapshot())");
@@ -39,6 +42,8 @@ describe("ChatGPT Web review-session lifecycle", () => {
     expect(engine).toContain("this.dependencies.chatgpt.deleteConversation(conversationUrl)");
     expect(engine).toContain("removePullRequestChatConversation");
     expect(engine).toContain("repository Project retained");
+    expect(engine).toContain("Do not overwrite");
+    expect(engine).toContain("cleanup incomplete");
     expect(renderer).toContain("function isTerminalReview(review)");
     expect(renderer).toContain('review?.status === "cancelled"');
     expect(renderer).toContain("Cancel review");

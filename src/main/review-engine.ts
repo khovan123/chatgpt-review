@@ -478,7 +478,10 @@ export class ReviewEngine {
           message,
         }),
         record.taskId,
-        (conversationUrl) => reviewConversationUrls.add(conversationUrl),
+        async (conversationUrl) => {
+          await bindConversation(conversationUrl);
+        },
+        record.conversationUrl,
       );
 
       const gatewayBinding = await gateway.start();
@@ -626,18 +629,15 @@ export class ReviewEngine {
 
     record.updatedAt = new Date().toISOString();
     if (failures.length) {
-      const cleanupError = `ChatGPT conversation cleanup failed: ${failures.join(" | ")}`;
-      if (record.status === "completed" || record.status === "blocked") {
-        record.status = "failed";
-        record.phase = "failed";
-        record.error = cleanupError;
-        record.completedAt = record.completedAt ?? record.updatedAt;
-      } else {
-        record.error = record.error ? `${record.error} Cleanup: ${cleanupError}` : cleanupError;
-      }
+      const firstFailure = failures[0] ?? "unknown cleanup failure";
+      const cleanupError = `ChatGPT conversation cleanup incomplete: ${failures.length}/${urls.length} conversation(s) could not be deleted after retries. First failure: ${firstFailure}`;
+      // Cleanup runs after the review outcome is already known. Do not overwrite
+      // a valid completed/blocked/failed/cancelled result just because ChatGPT's
+      // cleanup UI changed. Surface cleanup separately and preserve undeleted
+      // bindings so a later retry can still find them.
       await this.dependencies.state.upsertReview(record).catch(() => undefined);
       this.emit({
-        type: record.status === "failed" ? "state" : "progress",
+        type: "progress",
         reviewId: record.id,
         taskId: record.taskId,
         repository: record.repository,
