@@ -43,7 +43,7 @@ export interface ReviewEngineEvent {
   message: string;
 }
 
-type EngineView = Omit<AppView, "webhook" | "tunnel" | "cloudflareProvisioning">;
+type EngineView = Omit<AppView, "webhook" | "tunnel" | "cloudflareProvisioning" | "reviewActivity">;
 
 export class ReviewEngine {
   private prs: PullRequestSummary[] = [];
@@ -474,6 +474,7 @@ export class ReviewEngine {
           phase: record!.phase,
           message,
         }),
+        record.taskId,
       );
 
       const gatewayBinding = await gateway.start();

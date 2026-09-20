@@ -278,6 +278,7 @@ function toRemoteAdminView(view: AppView): Record<string, unknown> {
       const jira = record(review.jira);
       return {
         id: text(review.id),
+        taskId: text(review.taskId),
         trigger: text(review.trigger),
         status: text(review.status),
         phase: text(review.phase),
@@ -295,6 +296,22 @@ function toRemoteAdminView(view: AppView): Record<string, unknown> {
         jiraStatus: text(jira.status),
       };
     }),
+    reviewActivity: Object.fromEntries(
+      Object.entries(record(root.reviewActivity))
+        .slice(0, 200)
+        .map(([taskId, entries]) => [
+          text(taskId),
+          array(entries).slice(-120).map((entry) => {
+            const activity = record(entry);
+            return {
+              type: text(activity.type) === "state" ? "state" : "progress",
+              phase: text(activity.phase),
+              message: text(activity.message).slice(0, 2_000),
+              at: text(activity.at),
+            };
+          }),
+        ]),
+    ),
   };
 }
 
@@ -432,6 +449,18 @@ function renderAdminHtml(initialView: Record<string, unknown> | null = null, ini
     .review-body { display: grid; gap: 11px; margin-top: 12px; }
     .review-summary { color: #d4cfc7; font-size: 11px; line-height: 1.58; white-space: pre-wrap; }
     .review-error { color: var(--danger); font-size: 10.5px; line-height: 1.5; white-space: pre-wrap; }
+    .review-activity { overflow: hidden; border: 1px solid var(--border-soft); border-radius: 9px; background: #12110f; }
+    .review-activity-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--border-soft); padding: 8px 10px; }
+    .review-activity-title { color: #d9d4cc; font-size: 9.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+    .review-activity-count { color: var(--muted-2); font-size: 8.5px; }
+    .review-activity-log { display: grid; max-height: 260px; overflow: auto; padding: 5px 0; }
+    .review-activity-row { display: grid; grid-template-columns: 8px minmax(0,1fr); gap: 7px; padding: 5px 10px; }
+    .review-activity-row + .review-activity-row { border-top: 1px solid rgba(255,255,255,.025); }
+    .review-activity-dot { width: 5px; height: 5px; margin-top: 5px; border-radius: 999px; background: var(--muted-2); }
+    .review-activity-row.state .review-activity-dot { background: var(--info); }
+    .review-activity-copy { min-width: 0; }
+    .review-activity-message { overflow-wrap: anywhere; color: #bdb7ae; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 9.5px; line-height: 1.5; white-space: pre-wrap; }
+    .review-activity-meta { margin-top: 2px; color: var(--muted-2); font-size: 8px; }
     .overview-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; padding: 0 28px 36px; }
     .panel-card h3 { margin: 0 0 8px; font-size: 12px; }
     .panel-card p { margin: 0 0 10px; color: var(--muted); font-size: 10.5px; line-height: 1.5; }
@@ -749,7 +778,24 @@ function renderPrDetail() {
 }
 function renderReview(review) {
   const canCancel = review.status === 'running' || review.status === 'queued';
-  return '<article class="review-item"><div class="review-head"><div><div class="review-title">' + escapeHtml((review.trigger || 'manual') + ' · ' + (review.phase || review.status)) + '</div><div class="review-meta">' + escapeHtml(String(review.headSha || '').slice(0, 12) + ' · ' + (review.startedAt || '')) + '</div></div>' + badge(review.status, statusTone(review.status)) + '</div><div class="review-body"><div class="review-meta">Jira ' + escapeHtml((review.jiraKeys || []).join(', ') || 'none') + ' · ' + escapeHtml(review.jiraStatus || 'pending') + '</div>' + (review.error ? '<div class="review-error">' + escapeHtml(review.error) + '</div>' : '<div class="review-summary">' + (review.status === 'running' ? 'Review is in progress. State updates will appear automatically.' : 'Review completed or waiting for details.') + '</div>') + '<div class="button-row">' + (review.conversationUrl ? '<a class="button secondary" href="' + escapeAttr(review.conversationUrl) + '" target="_blank">Open Chat</a>' : '') + (canCancel ? '<button class="button danger" data-action="cancel-review" data-review-id="' + escapeAttr(review.id) + '">Cancel review</button>' : '') + '</div></div></article>';
+  const activityMap = state.view && state.view.reviewActivity ? state.view.reviewActivity : {};
+  const activity = Array.isArray(activityMap[review.taskId]) ? activityMap[review.taskId] : [];
+  const activityHtml = activity.length
+    ? renderReviewActivity(activity)
+    : '<div class="review-summary">' + (review.status === 'running' ? 'Review is in progress. Waiting for the next activity update…' : 'Review completed or waiting for details.') + '</div>';
+  return '<article class="review-item"><div class="review-head"><div><div class="review-title">' + escapeHtml((review.trigger || 'manual') + ' · ' + (review.phase || review.status)) + '</div><div class="review-meta">' + escapeHtml(String(review.headSha || '').slice(0, 12) + ' · ' + (review.startedAt || '')) + '</div></div>' + badge(review.status, statusTone(review.status)) + '</div><div class="review-body"><div class="review-meta">Jira ' + escapeHtml((review.jiraKeys || []).join(', ') || 'none') + ' · ' + escapeHtml(review.jiraStatus || 'pending') + '</div>' + (review.error ? '<div class="review-error">' + escapeHtml(review.error) + '</div>' : activityHtml) + '<div class="button-row">' + (review.conversationUrl ? '<a class="button secondary" href="' + escapeAttr(review.conversationUrl) + '" target="_blank">Open Chat</a>' : '') + (canCancel ? '<button class="button danger" data-action="cancel-review" data-review-id="' + escapeAttr(review.id) + '">Cancel review</button>' : '') + '</div></div></article>';
+}
+function renderReviewActivity(entries) {
+  const rows = entries.slice(-80).map((entry) => {
+    const meta = [entry.phase || '', formatActivityTime(entry.at)].filter(Boolean).join(' · ');
+    return '<div class="review-activity-row ' + (entry.type === 'state' ? 'state' : 'progress') + '"><span class="review-activity-dot"></span><div class="review-activity-copy"><div class="review-activity-message">' + escapeHtml(entry.message || '') + '</div>' + (meta ? '<div class="review-activity-meta">' + escapeHtml(meta) + '</div>' : '') + '</div></div>';
+  }).join('');
+  return '<div class="review-activity"><div class="review-activity-head"><span class="review-activity-title">Activity</span><span class="review-activity-count">' + String(entries.length) + ' event(s)</span></div><div class="review-activity-log">' + rows + '</div></div>';
+}
+function formatActivityTime(value) {
+  const parsed = Date.parse(value || '');
+  if (!Number.isFinite(parsed)) return '';
+  return new Date(parsed).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 function connectionRow(label, detail, ok) { return '<div class="connection-item"><span class="connection-copy"><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(detail || '') + '</span></span>' + badge(ok ? 'ready' : 'attention', ok ? 'success' : 'danger') + '</div>'; }
 function badge(text, tone) { return '<span class="badge ' + (tone || '') + '">' + escapeHtml(text || '') + '</span>'; }

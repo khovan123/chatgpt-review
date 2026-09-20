@@ -51,11 +51,13 @@ export class OcrChatGptGateway {
   private port = 0;
   private activeRequests = 0;
   private token = "";
+  private readonly seenToolResultDigests = new Set<string>();
 
   constructor(
     private readonly chatgpt: ChatGptWebDriver,
     private readonly projectUrl: string,
     private readonly onProgress?: (message: string) => void,
+    private readonly parentTaskId = "",
   ) {}
 
   async start(): Promise<OcrChatGptGatewayBinding> {
@@ -129,6 +131,7 @@ export class OcrChatGptGateway {
       const result = await this.complete(body, affinity);
       writeJson(response, 200, result);
     } catch (error) {
+      this.onProgress?.(`OCR gateway request failed: ${safeError(error)}`);
       writeJson(response, 500, {
         error: {
           message: safeError(error),
@@ -142,7 +145,9 @@ export class OcrChatGptGateway {
 
   private async complete(body: OpenAiChatRequest, affinity: string): Promise<Record<string, unknown>> {
     const tools = Array.isArray(body.tools) ? body.tools : [];
-    const taskId = taskIdForGatewayRequest(affinity, randomUUID());
+    const taskId = taskIdForGatewayRequest(this.parentTaskId, affinity, randomUUID());
+    const toolResults = summarizeNewToolResults(body.messages ?? [], this.seenToolResultDigests);
+    for (const result of toolResults) this.onProgress?.(result);
     const prompt = tools.length
       ? buildToolCallingPrompt(body, tools)
       : buildPlainCompletionPrompt(body);
@@ -160,6 +165,11 @@ export class OcrChatGptGateway {
       const assistant = tools.length
         ? parseToolCallingResponse(web.text, tools)
         : { content: web.text, toolCalls: [] as NativeToolCall[] };
+      if (assistant.toolCalls.length) {
+        this.onProgress?.(`OCR requested ${assistant.toolCalls.length} tool call(s): ${summarizeToolCalls(assistant.toolCalls)}`);
+      } else {
+        this.onProgress?.("OCR agent LLM turn completed with a final response.");
+      }
       return openAiResponse(
         body.model || "chatgpt-web",
         assistant.content,
@@ -381,9 +391,59 @@ function writeJson(response: ServerResponse, status: number, value: unknown): vo
   response.end(body);
 }
 
-function taskIdForGatewayRequest(affinity: string, nonce: string): string {
+function taskIdForGatewayRequest(parentTaskId: string, affinity: string, nonce: string): string {
   const digest = createHash("sha256").update(affinity).update("\0").update(nonce).digest("hex").slice(0, 16);
-  return `review_${digest}`;
+  const parent = parentTaskId.trim();
+  return parent ? `${parent}__ocr_${digest}` : `review_${digest}`;
+}
+
+function summarizeNewToolResults(messages: OpenAiMessage[], seen: Set<string>): string[] {
+  const results: string[] = [];
+  for (const message of messages) {
+    if (message.role !== "tool") continue;
+    const raw = typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "");
+    const digest = createHash("sha256")
+      .update(message.tool_call_id ?? "")
+      .update("\0")
+      .update(raw)
+      .digest("hex");
+    if (seen.has(digest)) continue;
+    seen.add(digest);
+    const label = message.name || message.tool_call_id || "tool";
+    results.push(`OCR tool result ${label}: ${redactActivityText(raw).slice(0, 1_200)}`);
+  }
+  while (seen.size > 500) {
+    const oldest = seen.values().next().value;
+    if (!oldest) break;
+    seen.delete(oldest);
+  }
+  return results.slice(-12);
+}
+
+function redactActivityText(value: string): string {
+  return String(value || "")
+    .replace(/(["']?(?:authorization|api[_-]?key|token|password|secret|cookie)["']?\s*[:=]\s*)["'][^"'\s]{4,}["']/gi, "$1\"[REDACTED]\"")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer [REDACTED]")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function summarizeToolCalls(toolCalls: NativeToolCall[]): string {
+  return toolCalls
+    .slice(0, 8)
+    .map((call) => {
+      const raw = call.function.arguments || "{}";
+      let args = raw;
+      try {
+        args = JSON.stringify(JSON.parse(raw));
+      } catch {
+        args = raw;
+      }
+      return `${call.function.name}(${args.replace(/[\r\n]+/g, " ").slice(0, 500)})`;
+    })
+    .join("; ")
+    .slice(0, 2_000);
 }
 
 function estimateTokens(value: string): number {

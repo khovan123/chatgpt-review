@@ -10,6 +10,7 @@ import { CloudflareNamedTunnelManager, cloudflareOriginUrl, normalizeCloudflareH
 import { GitHubProvider, normalizeGitHubRepositoryInput } from "./main/github-provider";
 import { OpenCodeReviewProvider } from "./main/open-code-review";
 import { createRemoteAdminHandler, RemoteAdminTokenStore, type RemoteAdminBuildResult } from "./main/remote-admin";
+import { ReviewActivityBuffer } from "./main/review-activity";
 import { ReviewEngine, type ReviewEngineEvent } from "./main/review-engine";
 import { SpecMemoryStore } from "./main/spec-memory";
 import { StateStore } from "./main/state-store";
@@ -27,6 +28,7 @@ let webhookServer: GitHubWebhookServer | null = null;
 let cloudflare: CloudflareNamedTunnelManager | null = null;
 let cloudflareApi: CloudflareApiProvisioner | null = null;
 
+const reviewActivity = new ReviewActivityBuffer();
 const execFileAsync = promisify(execFile);
 
 void app.whenReady().then(async () => {
@@ -535,8 +537,10 @@ async function triggerBuildFromRemote(): Promise<RemoteAdminBuildResult> {
 }
 
 async function getAppView(): Promise<AppView> {
+  const engineView = await requireEngine().view();
   return {
-    ...await requireEngine().view(),
+    ...engineView,
+    reviewActivity: reviewActivity.snapshot(engineView.reviews.map((review) => review.taskId)),
     cloudflareProvisioning: requireState().getCloudflareProvisioning(),
     webhook: requireWebhookServer().status(),
     tunnel: requireCloudflare().status(),
@@ -544,7 +548,8 @@ async function getAppView(): Promise<AppView> {
 }
 
 function publish(event: ReviewEngineEvent): void {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("review:event", event);
+  const normalized = reviewActivity.record(event);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("review:event", normalized);
 }
 
 function assertSender(senderId: number): void {

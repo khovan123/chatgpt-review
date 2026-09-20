@@ -58,6 +58,57 @@ describe("OCR ChatGPT Web OpenAI gateway", () => {
   });
 
 
+  it("streams deduplicated OCR tool results into review progress with secret redaction", async () => {
+    const progress: string[] = [];
+    const fakeDriver = {
+      startTask: async () => ({ conversationUrl: null, fallbackToNewConversation: false }),
+      send: async () => ({
+        text: "[OCR_OPENAI_RESPONSE]\n{\"content\":\"Review complete.\",\"tool_calls\":[]}\n[/OCR_OPENAI_RESPONSE]",
+        conversationUrl: "https://chatgpt.com/c/fake",
+      }),
+      finishTask: () => undefined,
+    };
+    const gateway = new OcrChatGptGateway(
+      fakeDriver as any,
+      "https://chatgpt.com/g/g-p-fake/project",
+      (message) => progress.push(message),
+      "review_parent",
+    );
+    const binding = await gateway.start();
+    try {
+      const payload = {
+        model: binding.model,
+        messages: [
+          { role: "user", content: "review" },
+          {
+            role: "tool",
+            tool_call_id: "call_read",
+            content: "{\"token\":\"super-secret-value\",\"path\":\"src/a.ts\",\"result\":\"ok\"}",
+          },
+        ],
+      };
+      for (let index = 0; index < 2; index += 1) {
+        const response = await fetch(`${binding.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${binding.token}`,
+          },
+          body: JSON.stringify(payload),
+        });
+        expect(response.status).toBe(200);
+      }
+
+      const toolResultProgress = progress.filter((message) => message.startsWith("OCR tool result call_read:"));
+      expect(toolResultProgress).toHaveLength(1);
+      expect(toolResultProgress[0]).toContain("[REDACTED]");
+      expect(toolResultProgress[0]).toContain("src/a.ts");
+      expect(toolResultProgress[0]).not.toContain("super-secret-value");
+    } finally {
+      await gateway.stop();
+    }
+  });
+
   it("maps structured ChatGPT Web output into native OpenAI tool calls", () => {
     const parsed = parseToolCallingResponse(
       "[OCR_OPENAI_RESPONSE]\\n{\"content\":\"\",\"tool_calls\":[{\"id\":\"call_1\",\"name\":\"file_read\",\"arguments\":{\"path\":\"src/a.ts\"}}]}\\n[/OCR_OPENAI_RESPONSE]".replaceAll("\\n", "\n"),

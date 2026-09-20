@@ -203,6 +203,13 @@ export interface ParsedReviewResult {
   findings: ReviewFinding[];
 }
 
+export interface ReviewActivityEntry {
+  type: "state" | "progress";
+  phase: string;
+  message: string;
+  at: string;
+}
+
 export interface ReviewRecord {
   id: string;
   taskId: string;
@@ -275,6 +282,7 @@ export interface AppView {
   cloudflareProvisioning: CloudflareProvisioningRecord | null;
   specs: SpecDocumentView[];
   reviews: ReviewRecord[];
+  reviewActivity: Record<string, ReviewActivityEntry[]>;
   repositories: RepositoryRecord[];
   provider: {
     ghInstalled: boolean;
