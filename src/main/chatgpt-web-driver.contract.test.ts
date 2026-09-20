@@ -54,6 +54,11 @@ describe("ChatGPT Web review-session lifecycle", () => {
     expect(driver).toContain('cleaned.includes("[CHUNK_REVIEW]")');
     expect(driver).toContain('cleaned.includes("[PR_REVIEW]")');
     expect(driver).toContain("if (progress !== lastProgress)");
+    expect(driver).toContain("ChatGPT prompt accepted for the current review step.");
+    expect(driver).toContain("ChatGPT conversation established for the current review step.");
+    expect(driver).toContain("ChatGPT review step still active:");
+    expect(driver).toContain("if (currentSignature !== lastSignature)");
+    expect(driver).not.toContain("snapshot.generating || currentSignature !== lastSignature");
     expect(renderer).toContain('if (type === "progress" && last?.type === "progress") entries[entries.length - 1] = nextEntry');
     expect(renderer).toContain("compactReviewProgress(rawText)");
   });

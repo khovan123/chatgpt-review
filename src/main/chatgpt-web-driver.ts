@@ -17,6 +17,7 @@ const HARD_TIMEOUT_MS = 30 * 60_000;
 const MAX_INPUT_BYTES = 120 * 1024;
 const MAX_OUTPUT_BYTES = 120 * 1024;
 const STABLE_POLLS = 3;
+const PROGRESS_HEARTBEAT_MS = 15_000;
 
 export interface ChatGptProgress {
   taskId: string;
@@ -339,15 +340,31 @@ export class ChatGptWebDriver {
       const state = await composerDiagnostics(contents);
       throw new Error(`ChatGPT review prompt was not accepted; no pull-request conversation was created or updated. attempts=${submitAttempts.join(',')}; ${state}`);
     }
+    this.onProgress?.({
+      taskId,
+      text: "ChatGPT prompt accepted for the current review step.",
+      generating: true,
+    });
     let boundConversationUrl = submission.conversationUrl;
-    if (boundConversationUrl) await onConversationUrl?.(boundConversationUrl);
+    let conversationAnnounced = false;
+    if (boundConversationUrl) {
+      await onConversationUrl?.(boundConversationUrl);
+      this.onProgress?.({
+        taskId,
+        text: "ChatGPT conversation established for the current review step.",
+        generating: true,
+      });
+      conversationAnnounced = true;
+    }
 
-    const hardDeadline = Date.now() + HARD_TIMEOUT_MS;
-    let idleDeadline = Date.now() + IDLE_TIMEOUT_MS;
+    const turnStartedAt = Date.now();
+    const hardDeadline = turnStartedAt + HARD_TIMEOUT_MS;
+    let idleDeadline = turnStartedAt + IDLE_TIMEOUT_MS;
     let lastSignature = signature(before);
     let stableText = "";
     let stablePolls = 0;
     let lastProgress = "";
+    let lastHeartbeatAt = turnStartedAt;
 
     while (Date.now() < hardDeadline && Date.now() < idleDeadline) {
       this.assertTask(taskId);
@@ -355,10 +372,18 @@ export class ChatGptWebDriver {
       if (currentConversationUrl && currentConversationUrl !== boundConversationUrl) {
         boundConversationUrl = currentConversationUrl;
         await onConversationUrl?.(currentConversationUrl);
+        if (!conversationAnnounced) {
+          this.onProgress?.({
+            taskId,
+            text: "ChatGPT conversation established for the current review step.",
+            generating: true,
+          });
+          conversationAnnounced = true;
+        }
       }
       const snapshot = await assistantSnapshot(contents);
       const currentSignature = signature(snapshot);
-      if (snapshot.generating || currentSignature !== lastSignature) {
+      if (currentSignature !== lastSignature) {
         lastSignature = currentSignature;
         idleDeadline = Date.now() + IDLE_TIMEOUT_MS;
       }
@@ -371,6 +396,19 @@ export class ChatGptWebDriver {
           lastProgress = progress;
           this.onProgress?.({ taskId, text: progress, generating: snapshot.generating });
         }
+      }
+      const now = Date.now();
+      if (now - lastHeartbeatAt >= PROGRESS_HEARTBEAT_MS) {
+        lastHeartbeatAt = now;
+        const elapsedSeconds = Math.max(1, Math.round((now - turnStartedAt) / 1_000));
+        const responseBytes = Buffer.byteLength(snapshot.text, "utf8");
+        this.onProgress?.({
+          taskId,
+          text: isNewTurn
+            ? `ChatGPT review step still active: ${elapsedSeconds}s elapsed · ${responseBytes} response byte(s) · generating=${snapshot.generating ? "yes" : "no"}.`
+            : `ChatGPT review step still active: ${elapsedSeconds}s elapsed · waiting for the first assistant turn · generating=${snapshot.generating ? "yes" : "no"}.`,
+          generating: snapshot.generating,
+        });
       }
       if (isNewTurn && !snapshot.generating && snapshot.text.trim()) {
         if (snapshot.text === stableText) stablePolls += 1;
@@ -1228,7 +1266,9 @@ async function assistantSnapshot(contents: WebContents): Promise<AssistantSnapsh
       return explicit || (container instanceof HTMLElement ? (container.getAttribute('data-turn-id') || '') : '');
     }).filter(Boolean);
     const latest = messages[messages.length - 1];
-    const stop = document.querySelector('button[data-testid="stop-button"], button[aria-label="Stop generating"]');
+    const stop = document.querySelector(
+      'button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop response"], button[aria-label="Stop"]'
+    );
     return {
       count: messages.length,
       text: latest instanceof HTMLElement ? latest.innerText : '',

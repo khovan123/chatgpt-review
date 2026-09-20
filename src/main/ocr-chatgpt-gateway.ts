@@ -159,7 +159,11 @@ export class OcrChatGptGateway {
       );
     }
 
-    this.onProgress?.(`OCR agent LLM turn via ChatGPT Web (${tools.length} tool(s), affinity ${shortAffinity(affinity)}).`);
+    const promptBytes = Buffer.byteLength(prompt, "utf8");
+    const mode = tools.length ? "tool-calling" : "plain";
+    this.onProgress?.(
+      `OCR agent LLM turn via ChatGPT Web (mode=${mode}, ${tools.length} tool(s), ${body.messages?.length ?? 0} message(s), ${promptBytes} prompt byte(s), affinity ${shortAffinity(affinity)}).`,
+    );
     await this.chatgpt.startTask(taskId, this.projectUrl);
     try {
       const web = await this.chatgpt.send(taskId, prompt);
