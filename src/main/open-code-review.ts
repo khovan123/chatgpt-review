@@ -241,7 +241,9 @@ export function normalizeManagedReview(
 
   const summary = blockReasons.length
     ? `OpenCodeReview managed review is incomplete: ${blockReasons.join("; ")}.`
-    : `OpenCodeReview managed review completed ${metadata.reviewedFiles}/${metadata.reviewableFiles} selected file(s) with ${findings.length} finding(s).`;
+    : blockingFindings.length
+      ? `${blockingFindings.length} supported P0–P2 finding(s) remain on the exact reviewed head after ${metadata.reviewedFiles}/${metadata.reviewableFiles} reviewable file(s) completed.`
+      : `No supported P0–P2 finding remains on the exact reviewed head after ${metadata.reviewedFiles}/${metadata.reviewableFiles} reviewable file(s) completed.${findings.length ? ` ${findings.length} non-blocking finding(s) were retained below.` : ""}`;
 
   return {
     verdict,
@@ -257,6 +259,7 @@ export function normalizeManagedReview(
 
 function normalizeComment(comment: OpenCodeReviewComment): ReviewFinding {
   const severity = mapSeverity(comment.severity, comment.category);
+  const sections = structuredFindingSections(comment.content);
   const range = comment.startLine === null
     ? comment.path
     : comment.endLine && comment.endLine !== comment.startLine
@@ -266,23 +269,25 @@ function normalizeComment(comment: OpenCodeReviewComment): ReviewFinding {
     severity,
     file: comment.path,
     line: comment.startLine,
-    title: findingTitle(comment.content),
+    title: findingTitle(comment.content, sections),
     explanation: comment.content,
-    evidence: comment.existingCode
+    evidence: sections.evidence || (comment.existingCode
       ? `OpenCodeReview finding at ${range}. Existing code:\n${comment.existingCode}`
-      : `OpenCodeReview managed-agent finding at ${range}.`,
+      : `OpenCodeReview managed-agent finding at ${range}.`),
     jiraRef: "",
     specRef: "",
-    suggestion: comment.suggestionCode
+    suggestion: sections.suggestion || (comment.suggestionCode
       ? `Suggested replacement:\n${comment.suggestionCode}`
-      : "Address the concrete issue identified by OpenCodeReview and add regression coverage where applicable.",
-    impact: severity === "P0" || severity === "P1"
+      : "Address the concrete issue identified by OpenCodeReview and add regression coverage where applicable."),
+    checkpoint: sections.checkpoint || humanizeCategory(comment.category),
+    rootCause: sections.rootCause || comment.content,
+    impact: sections.impact || (severity === "P0" || severity === "P1"
       ? "OpenCodeReview classified this as a high-impact finding."
       : severity === "P2"
         ? "OpenCodeReview classified this as a meaningful correctness or maintainability risk."
-        : undefined,
-    reproduction: comment.startLine === null ? undefined : `Inspect the changed behavior around ${range} and exercise the scenario described by the OCR finding.`,
-    regressionTests: severity === "P3" ? undefined : "Add a focused regression test that fails before the fix and passes after it.",
+        : undefined),
+    reproduction: sections.reproduction || (comment.startLine === null ? undefined : `Inspect the changed behavior around ${range} and exercise the scenario described by the OCR finding.`),
+    regressionTests: sections.regressionTests || (severity === "P3" ? undefined : "Add a focused regression test that fails before the fix and passes after it."),
   };
 }
 
@@ -296,11 +301,69 @@ function mapSeverity(severity: string, category: string): ReviewFinding["severit
   }
 }
 
-function findingTitle(content: string): string {
-  const firstLine = content.split(/\r?\n/, 1)[0]?.trim() ?? "";
-  const sentence = firstLine.match(/^(.{1,140}?)(?:[.!?](?:\s|$)|$)/)?.[1]?.trim() ?? firstLine;
-  if (!sentence) return "OpenCodeReview finding";
+function findingTitle(content: string, sections: StructuredFindingSections): string {
+  const heading = /^\s*#{0,6}\s*(checkpoint|root cause|impact|evidence|suggested fix|recommended fix|regression tests|reproduction)\s*:?\s*$/im;
+  const headingIndex = content.search(heading);
+  const preamble = (headingIndex >= 0 ? content.slice(0, headingIndex) : content).trim();
+  const candidate = preamble.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
+    || sections.rootCause.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
+    || sections.checkpoint
+    || "OpenCodeReview finding";
+  const sentence = candidate.match(/^(.{1,140}?)(?:[.!?](?:\s|$)|$)/)?.[1]?.trim() ?? candidate;
   return sentence.length > 140 ? `${sentence.slice(0, 137)}…` : sentence;
+}
+interface StructuredFindingSections {
+  checkpoint: string;
+  rootCause: string;
+  impact: string;
+  evidence: string;
+  suggestion: string;
+  regressionTests: string;
+  reproduction: string;
+}
+
+function structuredFindingSections(content: string): StructuredFindingSections {
+  const aliases: Record<string, keyof StructuredFindingSections> = {
+    checkpoint: "checkpoint",
+    "root cause": "rootCause",
+    impact: "impact",
+    evidence: "evidence",
+    "suggested fix": "suggestion",
+    "recommended fix": "suggestion",
+    "regression tests": "regressionTests",
+    reproduction: "reproduction",
+  };
+  const heading = /^\s*#{0,6}\s*(checkpoint|root cause|impact|evidence|suggested fix|recommended fix|regression tests|reproduction)\s*:?\s*$/i;
+  const buckets: Partial<Record<keyof StructuredFindingSections, string[]>> = {};
+  let active: keyof StructuredFindingSections | "" = "";
+  for (const line of content.split(/\r?\n/)) {
+    const match = line.match(heading);
+    if (match) {
+      active = aliases[match[1]?.toLowerCase() ?? ""] ?? "";
+      if (active && !buckets[active]) buckets[active] = [];
+      continue;
+    }
+    if (active) buckets[active]?.push(line);
+  }
+  const value = (key: keyof StructuredFindingSections) => (buckets[key] ?? []).join("\n").trim().slice(0, 20_000);
+  return {
+    checkpoint: value("checkpoint"),
+    rootCause: value("rootCause"),
+    impact: value("impact"),
+    evidence: value("evidence"),
+    suggestion: value("suggestion"),
+    regressionTests: value("regressionTests"),
+    reproduction: value("reproduction"),
+  };
+}
+
+function humanizeCategory(category: string): string | undefined {
+  if (!category) return undefined;
+  return category
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function buildManagedMetadata(

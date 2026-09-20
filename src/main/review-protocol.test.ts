@@ -92,6 +92,8 @@ AC two","status":"Open"}],"notes":"ok"}
         jiraRef: "",
         specRef: "",
         suggestion: "Restore the state guard before continuing.",
+        checkpoint: "Authorization state transition",
+        rootCause: "The refactor removed the required state guard before the authorization branch.",
         impact: "Invalid state can pass through the authorization path.",
         reproduction: "Call the changed path with an invalid state and observe that it is accepted.",
         regressionTests: "Add a test proving the invalid state is rejected and the valid state still succeeds.",
@@ -114,7 +116,7 @@ AC two","status":"Open"}],"notes":"ok"}
     const jira = {
       primaryKey: "LCSP-42",
       status: "resolved" as const,
-      issues: [{ key: "LCSP-42", summary: "Harden auth", description: "Do it", acceptanceCriteria: "Guard state", status: "In Progress" }],
+      issues: [{ key: "LCSP-42", summary: "Harden auth", description: "Do it", acceptanceCriteria: "AC1: Guard invalid state\nAC2: Preserve valid authorization flow", status: "In Progress" }],
       notes: "",
       raw: "",
     };
@@ -134,16 +136,37 @@ AC two","status":"Open"}],"notes":"ok"}
       excluded: [{ path: "src/a.test.ts", reason: "default_path" }],
     };
 
-    const markdown = reviewMarkdown(result, pr, jira, ocr);
-    expect(markdown).toContain("PR Re-Review — Automated Checklist");
-    expect(markdown).toContain("FAIL — 1 blocker below");
+    const markdown = reviewMarkdown(result, pr, jira, ocr, {
+      headSha: "b".repeat(40),
+      result: {
+        verdict: "CHANGES_REQUESTED",
+        summary: "Previous blocker",
+        jiraAlignment: "",
+        specAlignment: "",
+        testAssessment: "",
+        findings: [{ ...result.findings[0], title: "Old state guard defect" }],
+      },
+    });
+    expect(markdown).toContain("PR Re-Review — LCSP-42 Harden auth");
+    expect(markdown).toContain("CHANGES REQUESTED — 1 P0–P2 blocker");
     expect(markdown).toContain("Bug found");
     expect(markdown).toContain("Exact HEAD reviewed:** " + "a".repeat(40));
-    expect(markdown).toContain("Jira source of truth:** LCSP-42");
+    expect(markdown).toContain("Jira source of truth:** LCSP-42 — Harden auth");
     expect(markdown).toContain("OpenCodeReview v1.12.5 managed agent + ChatGPT Web LLM gateway");
-    expect(markdown).toContain("OCR coverage:** 1/1 reviewable files reviewed; 1 file(s) explicitly excluded by OCR.");
+    expect(markdown).toContain("OCR coverage:** 1/1 reviewable files reviewed; 1 explicitly excluded.");
     expect(markdown).toContain("OCR runtime:** complete · model chatgpt-web · 9 tool call(s) · 0 failure(s).");
+    expect(markdown).toContain("Guard invalid state");
+    expect(markdown).toContain("Preserve valid authorization flow");
+    expect(markdown).toContain("<summary><strong>🔎 Changed scope reviewed</strong>");
+    expect(markdown).toContain("### Checkpoint");
+    expect(markdown).toContain("Authorization state transition");
+    expect(markdown).toContain("### Root cause");
+    expect(markdown).toContain("The refactor removed the required state guard");
+    expect(markdown).toContain("### Suggested change");
+    expect(markdown).toContain("Restore the state guard before continuing.");
+    expect(markdown).toContain("✅ Resolved: P1 — Old state guard defect");
     expect(markdown).toContain("GitHub review event:** REQUEST_CHANGES");
+    expect(markdown).toContain("Merge status:** ❌ CHANGES REQUIRED");
     expect(markdown).toContain("P1 — Wrong guard");
 
     const unicodeHeavy = reviewMarkdown({
@@ -152,4 +175,62 @@ AC two","status":"Open"}],"notes":"ok"}
     }, pr, jira, ocr);
     expect(Buffer.byteLength(unicodeHeavy, "utf8")).toBeLessThanOrEqual(58_000);
   });
+  it("renders a PASS re-review with Jira checkpoints, reviewed-change dropdown and READY status", () => {
+    const markdown = reviewMarkdown({
+      verdict: "PASS",
+      summary: "No P0–P2 defect remains on this exact head.",
+      jiraAlignment: "LCSP-329 requirements were supplied to the managed review.",
+      specAlignment: "No attached spec context.",
+      testAssessment: "Repository CI is external to this runner.",
+      findings: [],
+    }, {
+      repository: "example/repo",
+      number: 329,
+      title: "refactor(auth): LCSP-329 revise Auth/RBAC boundary",
+      body: "",
+      url: "https://github.com/example/repo/pull/329",
+      headSha: "9".repeat(40),
+      headBranch: "lcsp-329-auth-rbac",
+      baseBranch: "develop",
+      isDraft: false,
+      state: "OPEN",
+      author: "dev",
+      changedFiles: 12,
+    }, {
+      primaryKey: "LCSP-329",
+      status: "resolved",
+      issues: [{
+        key: "LCSP-329",
+        summary: "Revised Auth/RBAC architecture",
+        description: "Realign the boundary.",
+        acceptanceCriteria: "AC1: Standard Auth module boundary\nAC2: RBAC owns authorization decisions\nAC3: Minimal Auth public surface",
+        status: "In Review",
+      }],
+      notes: "",
+      raw: "",
+    }, {
+      mode: "managed",
+      version: "1.12.5",
+      schemaVersion: "ocr-review-json",
+      status: "complete",
+      model: "chatgpt-web",
+      sessionId: "session-pass",
+      totalFiles: 12,
+      reviewableFiles: 10,
+      excludedFiles: 2,
+      reviewedFiles: 10,
+      toolCalls: 18,
+      toolCallFailures: 0,
+      excluded: [{ path: "docs/notes.md", reason: "unsupported_ext" }],
+    });
+
+    expect(markdown).toContain("# ✅ PR Re-Review — LCSP-329 Revised Auth/RBAC architecture");
+    expect(markdown).toContain("Standard Auth module boundary");
+    expect(markdown).toContain("RBAC owns authorization decisions");
+    expect(markdown).toContain("<summary><strong>🔎 Changed scope reviewed</strong>");
+    expect(markdown).toContain("✅ No supported P0–P2 defect remains on this exact head.");
+    expect(markdown).toContain("**Merge status:** ✅ READY");
+    expect(markdown).not.toContain("## Recommended fix order");
+  });
+
 });

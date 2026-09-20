@@ -275,11 +275,15 @@ function renderReviews(pr) {
             textEl("div", "finding-title", `${finding.severity} · ${finding.title}`),
             location ? textEl("div", "finding-location", location) : document.createDocumentFragment(),
             textEl("div", "finding-text", [
-              finding.explanation,
+              finding.checkpoint ? `Checkpoint: ${finding.checkpoint}` : "",
+              finding.rootCause ? `Root cause: ${finding.rootCause}` : finding.explanation,
               finding.evidence ? `Evidence: ${finding.evidence}` : "",
+              finding.impact ? `Impact: ${finding.impact}` : "",
               finding.jiraRef ? `Jira: ${finding.jiraRef}` : "",
               finding.specRef ? `Spec: ${finding.specRef}` : "",
-              finding.suggestion ? `Suggestion: ${finding.suggestion}` : "",
+              finding.suggestion ? `Suggested change: ${finding.suggestion}` : "",
+              finding.reproduction ? `Verification: ${finding.reproduction}` : "",
+              finding.regressionTests ? `Regression tests: ${finding.regressionTests}` : "",
             ].filter(Boolean).join("\n")),
           );
           findings.append(findingCard);

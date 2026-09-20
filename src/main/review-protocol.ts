@@ -86,6 +86,7 @@ export function buildOpenCodeReviewBackground(input: {
     truncateUtf8(input.pr.body, 2_000),
     `Jira context:\n${jiraText}`,
     `Optional spec context:\n${specText}`,
+    "Review reporting contract: for every concrete finding, keep the finding content concise and use these exact markdown headings on separate lines when the information is supported: Checkpoint, Root cause, Impact, Evidence, Suggested fix, Regression tests. Use suggestion_code only for a literal code replacement. Do not invent a blocker, root cause, test result, or Jira mapping that is not supported by repository evidence.",
   ].filter(Boolean).join("\n\n"), 7_500);
 }
 
@@ -93,32 +94,41 @@ export function githubReviewEventForVerdict(verdict: ParsedReviewResult["verdict
   return verdict === "PASS" ? "APPROVE" : "REQUEST_CHANGES";
 }
 
+interface PreviousReviewContext {
+  headSha: string;
+  result?: ParsedReviewResult;
+}
+
 export function reviewMarkdown(
   result: ParsedReviewResult,
   pr: PullRequestSummary,
   jira: JiraResolution,
   ocr?: OcrReviewMetadata,
+  previous?: PreviousReviewContext,
 ): string {
   const blockerFindings = result.findings.filter((finding) => finding.severity === "P0" || finding.severity === "P1" || finding.severity === "P2");
-  const jiraSource = jira.primaryKey
-    ?? (jira.issues.length ? jira.issues.map((issue) => issue.key).join(", ") : jira.status === "no-key" ? "No Jira key found" : jira.status.toUpperCase());
+  const cleanupFindings = result.findings.filter((finding) => finding.severity === "P3");
+  const jiraIssue = jira.primaryKey ? jira.issues.find((issue) => issue.key === jira.primaryKey) : jira.issues[0];
+  const jiraSource = jiraIssue
+    ? `${jiraIssue.key} — ${jiraIssue.summary}`
+    : jira.primaryKey ?? (jira.status === "no-key" ? "No Jira key found" : jira.status.toUpperCase());
   const reviewEvent = githubReviewEventForVerdict(result.verdict);
-  const mergeStatus = result.verdict === "PASS" ? "✅ APPROVE" : "❌ CHANGES REQUIRED";
+  const mergeStatus = result.verdict === "PASS" ? "✅ READY" : result.verdict === "BLOCKED" ? "⛔ BLOCKED" : "❌ CHANGES REQUIRED";
+  const titleIcon = result.verdict === "PASS" ? "✅" : result.verdict === "BLOCKED" ? "⛔" : "❌";
+  const reviewLabel = jiraIssue ? `${jiraIssue.key} ${jiraIssue.summary}` : pr.title;
   const heading = result.verdict === "PASS"
-    ? "✅ PASS — no supported P0–P2 blockers found"
+    ? "✅ PASS — no supported P0–P2 blocker remains"
     : result.verdict === "BLOCKED"
-      ? "❌ BLOCKED — required evidence was unavailable"
-      : `❌ FAIL — ${blockerFindings.length || result.findings.length} blocker${(blockerFindings.length || result.findings.length) === 1 ? "" : "s"} below`;
+      ? "⛔ BLOCKED — required review evidence is incomplete"
+      : `❌ CHANGES REQUESTED — ${blockerFindings.length} P0–P2 blocker${blockerFindings.length === 1 ? "" : "s"}`;
   const lines = [
     `<!-- chatgpt-review:${pr.headSha} -->`,
-    "# 🔎 PR Re-Review — Automated Checklist",
+    `# ${titleIcon} PR Re-Review — ${reviewLabel}`,
     "",
-    `**PR:** #${pr.number} — ${pr.title}`,
     `**Exact HEAD reviewed:** ${pr.headSha}`,
     `**Jira source of truth:** ${jiraSource}`,
-    `**Delta reviewed:** current GitHub PR diff at ${pr.headSha.slice(0, 12)} plus retrieved Jira/spec context.`,
     `**Review engine:** ${ocr ? `OpenCodeReview v${ocr.version} managed agent + ChatGPT Web LLM gateway` : "ChatGPT Web legacy diff review"}`,
-    ...(ocr ? [`**OCR coverage:** ${ocr.reviewedFiles}/${ocr.reviewableFiles} reviewable files reviewed; ${ocr.excludedFiles} file(s) explicitly excluded by OCR.`, `**OCR runtime:** ${ocr.status || "unknown"} · model ${ocr.model || "chatgpt-web"} · ${ocr.toolCalls ?? 0} tool call(s) · ${ocr.toolCallFailures ?? 0} failure(s).`] : []),
+    ...(ocr ? [`**OCR coverage:** ${ocr.reviewedFiles}/${ocr.reviewableFiles} reviewable files reviewed; ${ocr.excludedFiles} explicitly excluded.`, `**OCR runtime:** ${ocr.status || "unknown"} · model ${ocr.model || "chatgpt-web"} · ${ocr.toolCalls ?? 0} tool call(s) · ${ocr.toolCallFailures ?? 0} failure(s).`] : []),
     "",
     `## ${heading}`,
     "",
@@ -126,110 +136,164 @@ export function reviewMarkdown(
     "",
     "## Previous blocker status",
     "",
-    ...previousBlockerLines(result),
+    ...previousBlockerLines(result, previous),
     "",
-    "## Checklist",
+    "## Checkpoints",
     "",
-    "| # | Checklist | Result |",
+    "| # | Review checkpoint | Result |",
     "|---|---|---|",
-    ...checklistRows(result, blockerFindings.length),
+    ...checkpointRows(result, jira, ocr),
     "",
-    `**Exact-head CI at review time:** Not fetched by this local ChatGPT Web runner.`,
-    `**GitHub review event:** ${reviewEvent}`,
-    `**Merge status:** ${mergeStatus}`,
+    renderReviewedChanges(pr, jira, result, ocr),
     "",
-    "---",
   ];
 
-  if (result.findings.length) {
-    result.findings.forEach((finding, index) => {
-      lines.push("", renderFindingDetails(finding, index + 1));
-    });
+  if (blockerFindings.length) {
+    lines.push("## Blocking findings", "");
+    blockerFindings.forEach((finding, index) => lines.push(renderFindingDetails(finding, index + 1), ""));
   } else {
-    lines.push("", "No supported P0–P2 findings were returned by the final review synthesis.");
+    lines.push("## Blocking findings", "", "✅ No supported P0–P2 defect remains on this exact head.", "");
+  }
+
+  if (cleanupFindings.length) {
+    lines.push("## Non-blocking cleanup", "");
+    cleanupFindings.forEach((finding, index) => lines.push(renderFindingDetails(finding, index + 1), ""));
   }
 
   lines.push(
-    "",
-    "## Recommended fix order",
-    "",
-    ...recommendedFixLines(result),
-    "",
-    "_Generated by ChatGPT Web using the PR diff, mapped Jira context, and attached spec memory._",
+    `**GitHub review event:** ${reviewEvent}`,
+    `**Merge status:** ${mergeStatus}`,
   );
+
+  if (blockerFindings.length || result.verdict === "BLOCKED") {
+    lines.push("", "## Recommended fix order", "", ...recommendedFixLines(result));
+  }
+
+  lines.push("", "_Generated from the exact PR head using OpenCodeReview evidence with Jira/spec context supplied as review background._");
   return truncateUtf8(lines.join("\n"), 58_000);
 }
 
-function previousBlockerLines(result: ParsedReviewResult): string[] {
-  if (result.verdict === "PASS") return ["✅ Resolved/clear: no supported P0–P2 blockers remain in the reviewed head."];
-  if (result.verdict === "BLOCKED") return ["⚠️ Blocked: required evidence was unavailable or incomplete, so the PR cannot be approved from this run."];
-  return result.findings.length
-    ? result.findings.slice(0, 6).map((finding) => `❌ Still open: ${finding.severity} — ${finding.title}`)
-    : ["❌ Still open: final review requested changes, but no structured finding details were provided."];
+function previousBlockerLines(result: ParsedReviewResult, previous?: PreviousReviewContext): string[] {
+  if (!previous?.result) {
+    return ["ℹ️ No previous structured review result is available for comparison."];
+  }
+  const previousBlockers = previous.result.findings.filter((finding) => finding.severity !== "P3");
+  if (!previousBlockers.length) {
+    if (previous.result.verdict === "BLOCKED" && result.verdict !== "BLOCKED") {
+      return [`✅ Previous blocked review at ${previous.headSha.slice(0, 12)} is no longer blocked.`];
+    }
+    return [`✅ Previous review at ${previous.headSha.slice(0, 12)} had no P0–P2 findings.`];
+  }
+  const currentTitles = new Set(result.findings.filter((finding) => finding.severity !== "P3").map((finding) => normalizeFindingTitle(finding.title)));
+  return previousBlockers.slice(0, 12).map((finding) => {
+    const stillOpen = currentTitles.has(normalizeFindingTitle(finding.title));
+    return `${stillOpen ? "❌ Still open" : "✅ Resolved"}: ${finding.severity} — ${finding.title}`;
+  });
 }
 
-function checklistRows(result: ParsedReviewResult, blockerCount: number): string[] {
-  const criticalResult = result.verdict === "PASS"
-    ? "✅"
-    : result.verdict === "BLOCKED"
-      ? "❌ FAIL — evidence blocked"
-      : `❌ FAIL — ${blockerCount} P0–P2 blocker${blockerCount === 1 ? "" : "s"} below`;
-  return [
-    `| 1 | No Critical Logic Issues | ${criticalResult} |`,
-    `| 2 | No Critical Security Issues | ${securityResult(result)} |`,
-    "| 3 | No Critical Performance Issues | ✅ |",
-    "| 4 | No Untyped Code / Contract Gaps | ✅ |",
-    "| 5 | No Vietnamese in production code/comments | ✅ |",
-    "| 6 | Has Adequate Code Comments | ✅ |",
-    "| 7 | Meaningful Variable Naming & Correct Spelling | ✅ |",
-    "| 8 | Follows Folder & Architecture Conventions | ✅ |",
-    "| 9 | Caddyfile ↔ Docker Compose Consistency | ⏭️ SKIP — not touched unless findings say otherwise |",
-    "| 10 | Single Purpose | ✅ |",
-    "| 11 | Single Commit (Squashed) | ⏭️ SKIP — not a correctness gate |",
-    "| 12 | PR Title is Descriptive | ✅ |",
-    "| 13 | PR Has Description | ✅ |",
-    "| 14 | PR Size Within Limit | ⏭️ SKIP — no hard repository limit established |",
-    `| 15 | Jira / Work Item Linked | ${result.jiraAlignment || "✅"} |`,
-    "| 16 | Deploy Workflow Linked | ⏭️ SKIP — no deployment change unless findings say otherwise |",
-    `| 17 | PR Has Evidence | ${result.testAssessment || "✅"} |`,
-    "| 18 | Comment on Every Function & File | ⏭️ SKIP as a literal rule; complex safety paths should be documented |",
-  ];
+function checkpointRows(result: ParsedReviewResult, jira: JiraResolution, ocr?: OcrReviewMetadata): string[] {
+  const criteria = extractJiraCriteria(jira);
+  const rows: string[] = [];
+  let index = 1;
+  for (const criterion of criteria.slice(0, 24)) {
+    rows.push(`| ${index++} | ${escapeTableCell(criterion)} | ${criterionStatus(result)} |`);
+  }
+  const coverage = ocr
+    ? (ocr.reviewedFiles >= ocr.reviewableFiles && ocr.toolCallFailures === 0 ? "✅" : `⚠️ ${ocr.reviewedFiles}/${ocr.reviewableFiles}; ${ocr.toolCallFailures} tool failure(s)`)
+    : "ℹ️ OCR metadata unavailable";
+  rows.push(`| ${index++} | Exact-head review coverage | ${coverage} |`);
+  rows.push(`| ${index++} | No P0–P2 security regression | ${securityResult(result)} |`);
+  rows.push(`| ${index++} | Test / regression assessment | ${escapeTableCell(result.testAssessment || "Not separately executed by this runner.")} |`);
+  if (!criteria.length) {
+    rows.unshift(`| 1 | Jira / work-item alignment | ${escapeTableCell(result.jiraAlignment || jira.status)} |`);
+    for (let i = 1; i < rows.length; i += 1) rows[i] = rows[i].replace(/^\| \d+ \|/, `| ${i + 1} |`);
+  }
+  return rows;
+}
+
+function criterionStatus(result: ParsedReviewResult): string {
+  if (result.verdict === "PASS") return "✅";
+  if (result.verdict === "BLOCKED") return "⚠️ UNVERIFIED — evidence blocked";
+  return "⚠️ Re-check against blocking findings below";
+}
+
+function extractJiraCriteria(jira: JiraResolution): string[] {
+  const result: string[] = [];
+  for (const issue of jira.issues) {
+    const raw = issue.acceptanceCriteria.trim();
+    if (!raw) continue;
+    const normalized = raw.replace(/\s+(?=(?:AC\s*\d+|criterion\s*\d+|\d+)\s*[:.)-])/gi, "\n");
+    const lines = normalized.split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => line
+        .replace(/^[-*•]\s*/, "")
+        .replace(/^(?:AC\s*)?\d+\s*[:.)-]\s*/i, "")
+        .replace(/^criterion\s*\d+\s*[:.)-]\s*/i, "")
+        .trim())
+      .filter(Boolean);
+    result.push(...(lines.length ? lines : [raw]));
+  }
+  return [...new Set(result)].slice(0, 24);
 }
 
 function securityResult(result: ParsedReviewResult): string {
-  const hasSecurityFinding = result.findings.some((finding) => /security|auth|permission|secret|token|injection|xss|csrf|rce/i.test(`${finding.title} ${finding.explanation}`));
-  return hasSecurityFinding ? "❌ FAIL — security finding below" : "✅";
+  const blockingSecurityFinding = result.findings.some((finding) => finding.severity !== "P3" && /security|auth|permission|secret|token|injection|xss|csrf|rce|rbac/i.test(`${finding.checkpoint ?? ""} ${finding.title} ${finding.explanation}`));
+  return blockingSecurityFinding ? "❌ FAIL — security/auth finding below" : result.verdict === "BLOCKED" ? "⚠️ UNVERIFIED" : "✅";
+}
+
+function renderReviewedChanges(pr: PullRequestSummary, jira: JiraResolution, result: ParsedReviewResult, ocr?: OcrReviewMetadata): string {
+  const lines = [
+    "<details>",
+    `<summary><strong>🔎 Changed scope reviewed</strong> — ${pr.changedFiles} PR file(s) · ${ocr ? `${ocr.reviewedFiles}/${ocr.reviewableFiles} OCR-reviewed` : "OCR metadata unavailable"}</summary>`,
+    "",
+    `- **Base → head:** ${pr.baseBranch} → ${pr.headBranch} @ ${pr.headSha.slice(0, 12)}`,
+    `- **Jira:** ${jira.primaryKey ?? "none"} · ${jira.status}`,
+    `- **Jira alignment:** ${result.jiraAlignment || "No explicit Jira alignment note."}`,
+    `- **Spec:** ${result.specAlignment || "No attached spec context."}`,
+  ];
+  if (ocr?.excluded.length) {
+    lines.push("", "**Explicit OCR exclusions**", "");
+    for (const excluded of ocr.excluded.slice(0, 30)) lines.push(`- ${escapeInlineCode(excluded.path)} — ${excluded.reason}`);
+  }
+  lines.push("", "</details>");
+  return lines.join("\n");
 }
 
 function renderFindingDetails(finding: ReviewFinding, index: number): string {
   const location = finding.file ? ` — ${finding.file}${finding.line ? `:${finding.line}` : ""}` : "";
+  const icon = finding.severity === "P3" ? "ℹ️" : "❌";
   return [
     "<details>",
-    `<summary><strong>❌ ${finding.severity} — ${escapeDetailsSummary(finding.title)}${escapeDetailsSummary(location)}</strong></summary>`,
+    `<summary><strong>${icon} ${finding.severity} — ${escapeDetailsSummary(finding.title)}${escapeDetailsSummary(location)}</strong></summary>`,
+    "",
+    "### Checkpoint",
+    "",
+    finding.checkpoint || `Finding ${index}: ${finding.title}`,
     "",
     "### Evidence",
     "",
-    finding.evidence || finding.explanation || "Evidence was not provided in the structured result.",
+    finding.evidence || "Evidence was not provided in the structured result.",
     "",
     "### Root cause",
     "",
-    finding.explanation || "Root cause was not provided in the structured result.",
+    finding.rootCause || finding.explanation || "Root cause was not separately identified by the review evidence.",
     "",
     "### Impact",
     "",
-    finding.impact || [finding.jiraRef && `Jira: ${finding.jiraRef}`, finding.specRef && `Spec: ${finding.specRef}`].filter(Boolean).join(" · ") || "Impacted requirement was not explicitly mapped.",
+    finding.impact || [finding.jiraRef && `Jira: ${finding.jiraRef}`, finding.specRef && `Spec: ${finding.specRef}`].filter(Boolean).join(" · ") || "Impact was not explicitly mapped.",
     "",
-    "### Reproduction",
+    "### Suggested change",
+    "",
+    finding.suggestion || `Address the ${finding.severity} finding before merge.`,
+    "",
+    "### Reproduction / verification",
     "",
     finding.reproduction || reproductionFallback(finding),
     "",
-    "### Recommended fix",
-    "",
-    finding.suggestion || `Fix the ${finding.severity} finding before merge.`,
-    "",
     "### Regression tests",
     "",
-    finding.regressionTests || `Add a regression test that fails before the fix and covers: ${finding.title}.`,
+    finding.regressionTests || `Add focused regression coverage for: ${finding.title}.`,
     "",
     "</details>",
   ].join("\n");
@@ -237,21 +301,32 @@ function renderFindingDetails(finding: ReviewFinding, index: number): string {
 
 function reproductionFallback(finding: ReviewFinding): string {
   const location = finding.file ? `${finding.file}${finding.line ? `:${finding.line}` : ""}` : "the affected path";
-  return `Exercise ${location} using the scenario described in Evidence and confirm the incorrect behavior described in Root cause.`;
+  return `Exercise ${location} using the scenario described in Evidence and verify the behavior after the suggested change.`;
 }
 
 function recommendedFixLines(result: ParsedReviewResult): string[] {
-  if (result.verdict === "PASS") return ["1. No blocking fix order is required for this exact head."];
-  if (!result.findings.length) return ["1. Resolve the missing evidence / blocked review condition and rerun exact-head review."];
+  if (result.verdict === "BLOCKED" && !result.findings.length) return ["1. Restore the missing review evidence and rerun the exact-head review."];
   return result.findings
+    .filter((finding) => finding.severity !== "P3")
     .slice(0, 8)
     .map((finding, index) => `${index + 1}. ${finding.title}`);
+}
+
+function normalizeFindingTitle(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function escapeTableCell(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ").trim();
+}
+
+function escapeInlineCode(value: string): string {
+  return value.replace(/`/g, "′");
 }
 
 function escapeDetailsSummary(value: string): string {
   return value.replace(/[<>]/g, (char) => char === "<" ? "&lt;" : "&gt;");
 }
-
 
 function renderSpecMemory(chunks: RetrievedSpecChunk[]): string {
   if (!chunks.length) return "NONE";

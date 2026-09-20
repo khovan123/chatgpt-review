@@ -152,6 +152,8 @@ export interface ReviewFinding {
   jiraRef: string;
   specRef: string;
   suggestion: string;
+  checkpoint?: string;
+  rootCause?: string;
   impact?: string;
   reproduction?: string;
   regressionTests?: string;

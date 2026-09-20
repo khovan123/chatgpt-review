@@ -506,7 +506,7 @@ export class ReviewEngine {
         const submission = await this.dependencies.github.submitPullRequestReview(
           repository,
           pr.number,
-          reviewMarkdown(record.result, pr, jira, record.ocr),
+          reviewMarkdown(record.result, pr, jira, record.ocr, existing ? { headSha: existing.headSha, result: existing.result } : undefined),
           reviewEvent,
         );
         this.assertNotCancelled(record);

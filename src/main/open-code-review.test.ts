@@ -35,7 +35,7 @@ describe("OpenCodeReview managed integration", () => {
       comments: [
         {
           path: "src/auth.ts",
-          content: "Missing authorization guard allows a caller to cross the workspace boundary.",
+          content: "Missing authorization guard allows a caller to cross the workspace boundary.\n\nCheckpoint\nAuthorization boundary\n\nRoot cause\nThe changed path reads the repository without enforcing workspace access.\n\nImpact\nA caller can cross the workspace boundary.\n\nEvidence\nThe changed branch reaches repo.find(id) before any workspace assertion.\n\nSuggested fix\nRestore the workspace guard before repository access.\n\nRegression tests\nCover allowed and denied workspace access.",
           start_line: 42,
           end_line: 44,
           existing_code: "return repo.find(id)",
@@ -84,7 +84,11 @@ describe("OpenCodeReview managed integration", () => {
     expect(result.verdict).toBe("CHANGES_REQUESTED");
     expect(result.findings[0]?.severity).toBe("P1");
     expect(result.findings[0]?.file).toBe("src/auth.ts");
-    expect(result.findings[0]?.suggestion).toContain("assertWorkspaceAccess");
+    expect(result.findings[0]?.checkpoint).toBe("Authorization boundary");
+    expect(result.findings[0]?.rootCause).toContain("without enforcing workspace access");
+    expect(result.findings[0]?.evidence).toContain("reaches repo.find(id)");
+    expect(result.findings[0]?.suggestion).toContain("Restore the workspace guard");
+    expect(result.findings[0]?.regressionTests).toContain("allowed and denied workspace access");
     expect(result.findings[1]?.severity).toBe("P3");
   });
 
