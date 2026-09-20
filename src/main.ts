@@ -97,6 +97,7 @@ void app.whenReady().then(async () => {
       cancelReview: cancelReviewFromRemote,
       openChatGptSetup: openChatGptSetupFromRemote,
       restartCloudflare: restartCloudflareFromRemote,
+      updateConfig: updateConfigFromRemote,
       triggerBuild: triggerBuildFromRemote,
     }),
   });
@@ -176,19 +177,7 @@ function registerIpc(): void {
   ipcMain.handle("config:update", async (event, input: unknown) => {
     assertSender(event.sender.id);
     if (!isRecord(input)) throw new Error("Config update is invalid.");
-    validateConfigInput(input);
-    const before = requireState().getConfig();
-    const requestedHost = typeof input.webhookListenHost === "string" ? input.webhookListenHost : before.webhookListenHost;
-    const requestedPort = input.webhookListenPort === undefined ? before.webhookListenPort : Number(input.webhookListenPort);
-    const listenerWouldChange = requestedHost !== before.webhookListenHost || requestedPort !== before.webhookListenPort;
-    if (listenerWouldChange && before.cloudflareHostname) {
-      throw new Error("Local webhook host/port is locked while a named tunnel is connected. Disconnect or remove the managed Cloudflare tunnel before changing the origin.");
-    }
-
-    const next = await requireState().setConfig(input as Partial<ReviewConfig>);
-    await requireEngine().refreshProviderStatus();
-    if (listenerWouldChange) await startWebhookIngress();
-    return getAppView();
+    return updateReviewConfig(input);
   });
 
   ipcMain.handle("cloudflare:setup-begin", async (event, input: unknown) => {
@@ -524,6 +513,26 @@ async function cancelReviewFromRemote(reviewId: string): Promise<AppView> {
 
 async function openChatGptSetupFromRemote(): Promise<void> {
   await requireChatGpt().showSetup();
+}
+
+async function updateReviewConfig(input: Record<string, any>): Promise<AppView> {
+  validateConfigInput(input);
+  const before = requireState().getConfig();
+  const requestedHost = typeof input.webhookListenHost === "string" ? input.webhookListenHost : before.webhookListenHost;
+  const requestedPort = input.webhookListenPort === undefined ? before.webhookListenPort : Number(input.webhookListenPort);
+  const listenerWouldChange = requestedHost !== before.webhookListenHost || requestedPort !== before.webhookListenPort;
+  if (listenerWouldChange && before.cloudflareHostname) {
+    throw new Error("Local webhook host/port is locked while a named tunnel is connected. Disconnect or remove the managed Cloudflare tunnel before changing the origin.");
+  }
+
+  await requireState().setConfig(input as Partial<ReviewConfig>);
+  await requireEngine().refreshProviderStatus();
+  if (listenerWouldChange) await startWebhookIngress();
+  return getAppView();
+}
+
+async function updateConfigFromRemote(config: Partial<ReviewConfig>): Promise<AppView> {
+  return updateReviewConfig(config as Record<string, any>);
 }
 
 async function restartCloudflareFromRemote(): Promise<AppView> {

@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 
-import type { AppView } from "./types";
+import type { AppView, ReviewConfig } from "./types";
 import type { ExtraHttpHandler } from "./webhook-server";
 
 const MAX_ADMIN_BODY_BYTES = 64 * 1024;
@@ -44,6 +44,7 @@ export interface RemoteAdminDependencies {
   cancelReview: (reviewId: string) => Promise<AppView>;
   openChatGptSetup: () => Promise<void>;
   restartCloudflare: () => Promise<AppView>;
+  updateConfig: (config: Partial<ReviewConfig>) => Promise<AppView>;
   triggerBuild: () => Promise<RemoteAdminBuildResult>;
 }
 
@@ -125,6 +126,10 @@ export function createRemoteAdminHandler(dependencies: RemoteAdminDependencies):
           writeJson(response, 200, await dependencies.restartCloudflare());
           return true;
         }
+        case "/admin/api/config/update": {
+          writeJson(response, 200, await dependencies.updateConfig(remoteConfigInput(body)));
+          return true;
+        }
         case "/admin/api/system/build": {
           writeJson(response, 200, await dependencies.triggerBuild());
           return true;
@@ -184,6 +189,28 @@ function requiredPositiveInteger(value: Record<string, any>, key: string): numbe
   return number;
 }
 
+function remoteConfigInput(value: Record<string, any>): Partial<ReviewConfig> {
+  const config: Partial<ReviewConfig> = {};
+  for (const key of ["autoReview", "postComment", "reviewDrafts", "requireJiraWhenKeyPresent"] as const) {
+    if (typeof value[key] !== "boolean") throw new Error(`${key} must be a boolean.`);
+    config[key] = value[key];
+  }
+  const maxDiffChunkBytes = Number(value.maxDiffChunkBytes);
+  if (!Number.isInteger(maxDiffChunkBytes) || maxDiffChunkBytes < 12_000 || maxDiffChunkBytes > 90_000) {
+    throw new Error("maxDiffChunkBytes must be between 12000 and 90000.");
+  }
+  config.maxDiffChunkBytes = maxDiffChunkBytes;
+
+  const webhookListenHost = requiredString(value, "webhookListenHost", 64);
+  const webhookListenPort = Number(value.webhookListenPort);
+  if (!Number.isInteger(webhookListenPort) || webhookListenPort < 1024 || webhookListenPort > 65535) {
+    throw new Error("webhookListenPort must be between 1024 and 65535.");
+  }
+  config.webhookListenHost = webhookListenHost;
+  config.webhookListenPort = webhookListenPort;
+  return config;
+}
+
 function writeHtml(response: ServerResponse, html: string): void {
   response.writeHead(200, {
     "content-type": "text/html; charset=utf-8",
@@ -221,6 +248,9 @@ function toRemoteAdminView(view: AppView): Record<string, unknown> {
       postComment: config.postComment === true,
       reviewDrafts: config.reviewDrafts === true,
       requireJiraWhenKeyPresent: config.requireJiraWhenKeyPresent === true,
+      maxDiffChunkBytes: number(config.maxDiffChunkBytes) || 42_000,
+      webhookListenHost: text(config.webhookListenHost) || "127.0.0.1",
+      webhookListenPort: number(config.webhookListenPort) || 8787,
       webhookPublicUrl: text(config.webhookPublicUrl),
       cloudflareHostname: text(config.cloudflareHostname),
     },
@@ -483,6 +513,15 @@ function renderAdminHtml(initialView: Record<string, unknown> | null = null, ini
     input, select { width: 100%; min-height: 34px; border: 1px solid var(--border); border-radius: 8px; outline: none; background: #141310; color: var(--foreground); padding: 7px 9px; font-size: 10.5px; }
     input:focus, select:focus { border-color: #6e685e; box-shadow: 0 0 0 2px rgba(255,255,255,.035); }
     .setting-grid { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+    .remote-settings-list { display: grid; gap: 0; overflow: hidden; border: 1px solid var(--border-soft); border-radius: 9px; background: #12110f; }
+    .remote-toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px; cursor: pointer; }
+    .remote-toggle + .remote-toggle { border-top: 1px solid var(--border-soft); }
+    .remote-toggle-copy strong { display: block; font-size: 10.5px; }
+    .remote-toggle-copy span { display: block; margin-top: 3px; color: var(--muted); font-size: 9.5px; line-height: 1.45; }
+    .remote-toggle input[type="checkbox"] { width: 16px; min-height: 16px; height: 16px; flex: 0 0 auto; accent-color: #e7e1d7; }
+    .remote-setting-fields { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 8px; margin-top: 10px; }
+    .remote-field { display: grid; gap: 5px; color: var(--muted); font-size: 9px; }
+    .remote-config-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
     .empty { color: var(--muted); padding: 16px 8px; font-size: 10.5px; line-height: 1.5; }
     a { color: #8ab4ff; text-decoration: none; }
     a:hover { text-decoration: underline; }
@@ -593,6 +632,8 @@ document.addEventListener('click', (event) => {
       void post('/admin/api/chatgpt/setup', {});
     } else if (action === 'cloudflare-restart') {
       void post('/admin/api/cloudflare/restart', {});
+    } else if (action === 'save-config') {
+      void saveRemoteConfig().catch(() => undefined);
     } else if (action === 'build-app') {
       void buildApp();
     }
@@ -603,6 +644,19 @@ document.addEventListener('click', (event) => {
 function adminToken() { return (localStorage.getItem('chatgpt-review-admin-token') || tokenInput.value || '').trim(); }
 function inputValue(id) { const node = document.getElementById(id); return node && 'value' in node ? String(node.value).trim() : ''; }
 function repoInputValue() { const repo = inputValue('repoInput'); if (!repo) throw new Error('Repository is required.'); return repo; }
+function checkboxValue(id) { const node = document.getElementById(id); return Boolean(node && 'checked' in node && node.checked); }
+async function saveRemoteConfig() {
+  await post('/admin/api/config/update', {
+    autoReview: checkboxValue('remote-auto-review'),
+    postComment: checkboxValue('remote-post-comment'),
+    reviewDrafts: checkboxValue('remote-review-drafts'),
+    requireJiraWhenKeyPresent: checkboxValue('remote-require-jira'),
+    maxDiffChunkBytes: Number(inputValue('remote-max-diff')),
+    webhookListenHost: inputValue('remote-webhook-host'),
+    webhookListenPort: Number(inputValue('remote-webhook-port')),
+  });
+  showNotice('Settings saved and synchronized with the desktop app.', false);
+}
 function withToken(path) { const token = adminToken(); if (!token) return path; return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token); }
 function authHeaders() { return { authorization: 'Bearer ' + adminToken(), 'content-type': 'application/json' }; }
 async function api(path, options) {
@@ -755,6 +809,8 @@ function renderOverview() {
   const provider = view.provider || {};
   const ocr = view.ocr || {};
   const chatgpt = view.chatgpt || {};
+  const config = view.config || {};
+  const ingressLocked = Boolean(config.cloudflareHostname);
   const detailHtml = '<header class="pr-detail-header"><div class="pr-detail-title-group"><div class="mono-label">REMOTE ADMIN</div><h2>ChatGPT Review workspace</h2><p class="pr-detail-meta">Manage the VPS worker with the same navigation model as the desktop app.</p></div><div class="workspace-actions"><button class="button secondary" data-action="refresh-prs">Refresh PRs</button><button class="button" data-action="chatgpt-setup">Open ChatGPT setup</button></div></header>'
     + '<div class="history-heading"><div><p class="column-eyebrow">STATUS</p><h3>Connections</h3></div><span class="count-pill">' + String(repositories().length) + '</span></div>'
     + '<div class="overview-grid"><section class="panel-card"><h3>Connection status</h3><div class="connection-list">'
@@ -766,6 +822,13 @@ function renderOverview() {
     + '</div></section>'
     + '<section class="panel-card"><h3>Repository</h3><p>Link repositories and keep GitHub webhook configuration synchronized.</p><div class="setting-grid"><input id="repoInput" placeholder="owner/repo" value="' + escapeAttr(state.selectedRepo || '') + '" /><button class="button" data-action="link-repo">Link</button></div><div class="button-row" style="margin-top:8px"><button class="button secondary" data-action="sync-webhook">Sync webhook</button><button class="button secondary" data-action="refresh-prs">Refresh PRs</button><button class="button danger" data-action="unlink-repo">Unlink</button></div></section>'
     + '<section class="panel-card"><h3>GitHub setup</h3><p>Paste a GitHub token once. The app passes it to gh auth login --with-token.</p><div class="setting-grid"><input id="github-token" type="password" placeholder="GitHub token" /><button class="button" data-action="github-auth">Authenticate gh</button></div></section>'
+    + '<section class="panel-card"><h3>Review settings</h3><p>These values are shared with the desktop Settings screen and take effect for new review runs.</p><div class="remote-settings-list">'
+    + remoteToggle('remote-auto-review', 'Auto review', 'Automatically review eligible PR webhook events.', Boolean(config.autoReview))
+    + remoteToggle('remote-post-comment', 'Post GitHub review', 'Submit the completed review back to GitHub.', Boolean(config.postComment))
+    + remoteToggle('remote-review-drafts', 'Include draft PRs', 'Allow draft pull requests into the automatic review queue.', Boolean(config.reviewDrafts))
+    + remoteToggle('remote-require-jira', 'Require Jira mapping', 'Block when a referenced Jira key cannot be resolved.', Boolean(config.requireJiraWhenKeyPresent))
+    + '</div><div class="remote-setting-fields"><label class="remote-field"><span>Max diff chunk bytes</span><input id="remote-max-diff" type="number" min="12000" max="90000" step="1000" value="' + escapeAttr(String(config.maxDiffChunkBytes || 42000)) + '" /></label></div><div class="remote-config-actions"><button class="button" data-action="save-config">Save settings</button></div></section>'
+    + '<section class="panel-card"><h3>Local webhook ingress</h3><p>' + (ingressLocked ? 'Host and port are locked while the Cloudflare named tunnel is connected.' : 'Configure the local listener used by GitHub webhook ingress.') + '</p><div class="remote-setting-fields"><label class="remote-field"><span>Listen host</span><input id="remote-webhook-host" value="' + escapeAttr(config.webhookListenHost || '127.0.0.1') + '" ' + disabledAttr(ingressLocked) + ' /></label><label class="remote-field"><span>Listen port</span><input id="remote-webhook-port" type="number" min="1024" max="65535" value="' + escapeAttr(String(config.webhookListenPort || 8787)) + '" ' + disabledAttr(ingressLocked) + ' /></label></div><div class="review-meta">Public webhook: ' + escapeHtml(config.webhookPublicUrl || 'Not connected') + '</div></section>'
     + '<section class="panel-card"><h3>Operations</h3><p>Build or restart worker-side services from the browser.</p><div class="button-row"><button class="button secondary" data-action="cloudflare-restart">Restart Cloudflare tunnel</button><button class="button secondary" data-action="build-app">Run npm build</button></div></section></div>';
   setHtmlIfChanged('detail', detailHtml);
 }
@@ -797,6 +860,9 @@ function formatActivityTime(value) {
   if (!Number.isFinite(parsed)) return '';
   return new Date(parsed).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
+function remoteToggle(id, title, detail, checked) { return '<label class="remote-toggle"><span class="remote-toggle-copy"><strong>' + escapeHtml(title) + '</strong><span>' + escapeHtml(detail) + '</span></span><input id="' + escapeAttr(id) + '" type="checkbox" ' + checkedAttr(checked) + ' /></label>'; }
+function checkedAttr(value) { return value ? 'checked' : ''; }
+function disabledAttr(value) { return value ? 'disabled' : ''; }
 function connectionRow(label, detail, ok) { return '<div class="connection-item"><span class="connection-copy"><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(detail || '') + '</span></span>' + badge(ok ? 'ready' : 'attention', ok ? 'success' : 'danger') + '</div>'; }
 function badge(text, tone) { return '<span class="badge ' + (tone || '') + '">' + escapeHtml(text || '') + '</span>'; }
 function statusTone(status) { if (status === 'completed') return 'success'; if (status === 'running' || status === 'queued') return 'info'; if (status === 'failed' || status === 'blocked') return 'danger'; if (status === 'cancelled') return 'warning'; return 'warning'; }
