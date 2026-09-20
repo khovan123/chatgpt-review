@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { BrowserWindow, session, shell, type Session, type WebContents } from "electron";
 
 import { isValidReviewTaskId } from "./review-activity";
+import { composerContentMatches } from "./chatgpt-composer";
 
 const CHATGPT_URL = "https://chatgpt.com/";
 const PARTITION = "persist:chatgpt-pr-review";
@@ -948,6 +949,8 @@ async function composerReady(contents: WebContents): Promise<boolean> {
 type ComposerInteractionState = {
   hasText: boolean;
   textLength: number;
+  innerText: string;
+  textContent: string;
   sendEnabled: boolean;
   active: boolean;
 };
@@ -959,11 +962,12 @@ async function composerInteractionState(contents: WebContents): Promise<Composer
       || document.querySelector('[contenteditable="true"][data-testid*="prompt"]')
       || document.querySelector('textarea');
     if (!(composer instanceof HTMLElement)) {
-      return { hasText: false, textLength: 0, sendEnabled: false, active: false };
+      return { hasText: false, textLength: 0, innerText: '', textContent: '', sendEnabled: false, active: false };
     }
-    const value = composer instanceof HTMLTextAreaElement
-      ? composer.value
-      : (composer.innerText || composer.textContent || '');
+    const textareaValue = composer instanceof HTMLTextAreaElement ? composer.value : '';
+    const innerText = composer instanceof HTMLTextAreaElement ? textareaValue : (composer.innerText || '');
+    const textContent = composer instanceof HTMLTextAreaElement ? textareaValue : (composer.textContent || '');
+    const value = innerText || textContent;
     const scope = composer.closest('form') || document;
     const buttons = Array.from(scope.querySelectorAll('button'));
     const send = buttons.find((node) => {
@@ -978,6 +982,8 @@ async function composerInteractionState(contents: WebContents): Promise<Composer
     return {
       hasText: value.trim().length > 0,
       textLength: value.length,
+      innerText,
+      textContent,
       sendEnabled: send instanceof HTMLButtonElement
         && !send.disabled
         && !send.hasAttribute('data-disabled')
@@ -1053,10 +1059,9 @@ async function trustedSetComposerText(contents: WebContents, message: string): P
     await delay(300);
     state = await composerInteractionState(contents);
   }
-  const expectedLength = normalizedComposerLength(message);
-  if (state.hasText && Math.abs(state.textLength - expectedLength) > composerLengthTolerance(expectedLength)) {
+  if (state.hasText && !composerContentMatches(message, [state.innerText, state.textContent])) {
     throw new Error(
-      `ChatGPT composer did not commit the full review prompt (expected≈${expectedLength}, actual=${state.textLength}).`,
+      `ChatGPT composer did not commit the full review prompt (expectedChars=${message.length}, innerTextChars=${state.innerText.length}, textContentChars=${state.textContent.length}).`,
     );
   }
   return state;
@@ -1080,14 +1085,6 @@ export function splitComposerInput(message: string, maxChunkChars = COMPOSER_INS
     start = end;
   }
   return chunks;
-}
-
-function normalizedComposerLength(message: string): number {
-  return message.replace(/\r\n/g, "\n").length;
-}
-
-function composerLengthTolerance(expectedLength: number): number {
-  return Math.max(32, Math.ceil(expectedLength * 0.01));
 }
 
 async function submitComposerForm(contents: WebContents): Promise<boolean> {
