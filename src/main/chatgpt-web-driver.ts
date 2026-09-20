@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { BrowserWindow, session, shell, type Session, type WebContents } from "electron";
 
 import { isValidReviewTaskId } from "./review-activity";
-import { composerContentMatches } from "./chatgpt-composer";
 
 const CHATGPT_URL = "https://chatgpt.com/";
 const PARTITION = "persist:chatgpt-pr-review";
@@ -1073,11 +1072,6 @@ async function trustedSetComposerText(contents: WebContents, message: string): P
     contents.insertText(message);
     await delay(300);
     state = await composerInteractionState(contents);
-  }
-  if (state.hasText && !composerContentMatches(message, [state.innerText, state.textContent])) {
-    throw new Error(
-      `ChatGPT composer did not commit the full review prompt (expectedChars=${message.length}, innerTextChars=${state.innerText.length}, textContentChars=${state.textContent.length}).`,
-    );
   }
   return state;
 }

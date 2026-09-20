@@ -121,7 +121,7 @@ describe("ChatGPT Web review-session lifecycle", () => {
     expect(driver).toContain("splitComposerInput(message, COMPOSER_INSERT_CHUNK_CHARS)");
     expect(driver).toContain("for (const chunk of chunks)");
     expect(driver).toContain('debuggerApi.sendCommand("Input.insertText", { text: chunk })');
-    expect(driver).toContain("ChatGPT composer did not commit the full review prompt");
+    expect(driver).not.toContain("ChatGPT composer did not commit the full review prompt");
     expect(driver).toContain("submitComposerForm");
     expect(driver).toContain("form.requestSubmit(send)");
     expect(driver).toContain("trustedClickSend");
@@ -131,6 +131,7 @@ describe("ChatGPT Web review-session lifecycle", () => {
     expect(driver).not.toContain("BrowserWindow.fromWebContents(contents)");
     expect(driver).toContain("trustedSubmitPrompt");
     expect(driver).toContain("waitForPromptSubmission");
+    expect(driver).toContain("userMessages > beforeUserMessages");
     expect(driver).toContain("composerDiagnostics");
     expect(driver).toContain("no pull-request conversation was created or updated");
     expect(driver).toContain('segment === "c"');
