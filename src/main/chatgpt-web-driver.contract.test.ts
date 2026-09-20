@@ -111,7 +111,10 @@ describe("ChatGPT Web review-session lifecycle", () => {
     expect(driver).toContain("interactiveFallback: false");
     expect(driver).toContain("hidden review window");
     expect(driver).toContain("trustedSetComposerText");
-    expect(driver).toContain('debuggerApi.sendCommand("Input.insertText"');
+    expect(driver).toContain("splitComposerInput(message, COMPOSER_INSERT_CHUNK_CHARS)");
+    expect(driver).toContain("for (const chunk of chunks)");
+    expect(driver).toContain('debuggerApi.sendCommand("Input.insertText", { text: chunk })');
+    expect(driver).toContain("ChatGPT composer did not commit the full review prompt");
     expect(driver).toContain("submitComposerForm");
     expect(driver).toContain("form.requestSubmit(send)");
     expect(driver).toContain("trustedClickSend");

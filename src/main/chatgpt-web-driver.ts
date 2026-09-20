@@ -18,6 +18,8 @@ const MAX_INPUT_BYTES = 120 * 1024;
 const MAX_OUTPUT_BYTES = 120 * 1024;
 const STABLE_POLLS = 3;
 const PROGRESS_HEARTBEAT_MS = 15_000;
+const COMPOSER_INSERT_CHUNK_CHARS = 4_096;
+const COMPOSER_INSERT_SETTLE_MS = 35;
 
 export interface ChatGptProgress {
   taskId: string;
@@ -1020,10 +1022,16 @@ async function trustedSetComposerText(contents: WebContents, message: string): P
     await debuggerApi.sendCommand("Input.dispatchKeyEvent", {
       type: "keyUp", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8,
     });
-    // Input.insertText enters the entire bounded review prompt through Chromium's
-    // editing pipeline. It is preferable to one key event per character for
-    // prompts that may approach the 120 KiB review bound.
-    await debuggerApi.sendCommand("Input.insertText", { text: message });
+    // Large one-shot Input.insertText payloads can become visible in ChatGPT's
+    // contenteditable DOM without fully committing the ProseMirror/React editor
+    // state. The send button then looks enabled, but clicking it produces no
+    // user turn. Feed bounded chunks through Chromium's editing pipeline and
+    // briefly yield between chunks so the controlled editor can commit state.
+    const chunks = splitComposerInput(message, COMPOSER_INSERT_CHUNK_CHARS);
+    for (const chunk of chunks) {
+      await debuggerApi.sendCommand("Input.insertText", { text: chunk });
+      if (chunks.length > 1) await delay(COMPOSER_INSERT_SETTLE_MS);
+    }
     usedCdp = true;
   } catch {
     contents.sendInputEvent({ type: "keyDown", keyCode: "A", modifiers: ["control"] });
@@ -1045,7 +1053,41 @@ async function trustedSetComposerText(contents: WebContents, message: string): P
     await delay(300);
     state = await composerInteractionState(contents);
   }
+  const expectedLength = normalizedComposerLength(message);
+  if (state.hasText && Math.abs(state.textLength - expectedLength) > composerLengthTolerance(expectedLength)) {
+    throw new Error(
+      `ChatGPT composer did not commit the full review prompt (expected≈${expectedLength}, actual=${state.textLength}).`,
+    );
+  }
   return state;
+}
+
+export function splitComposerInput(message: string, maxChunkChars = COMPOSER_INSERT_CHUNK_CHARS): string[] {
+  if (!Number.isSafeInteger(maxChunkChars) || maxChunkChars < 256) {
+    throw new Error("Composer insert chunk size is invalid.");
+  }
+  if (!message) return [""];
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < message.length) {
+    let end = Math.min(message.length, start + maxChunkChars);
+    if (end < message.length) {
+      const code = message.charCodeAt(end - 1);
+      if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+    }
+    if (end <= start) end = Math.min(message.length, start + maxChunkChars);
+    chunks.push(message.slice(start, end));
+    start = end;
+  }
+  return chunks;
+}
+
+function normalizedComposerLength(message: string): number {
+  return message.replace(/\r\n/g, "\n").length;
+}
+
+function composerLengthTolerance(expectedLength: number): number {
+  return Math.max(32, Math.ceil(expectedLength * 0.01));
 }
 
 async function submitComposerForm(contents: WebContents): Promise<boolean> {
