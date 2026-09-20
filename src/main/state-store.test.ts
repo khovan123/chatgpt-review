@@ -166,6 +166,31 @@ describe("StateStore ChatGPT Project and PR conversation bindings", () => {
     )).rejects.toThrow("changed concurrently");
   });
 
+  it("removes only the completed review conversation while retaining the repository Project", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "chatgpt-review-pr-conversation-remove-"));
+    cleanup.push(root);
+    const file = path.join(root, "state.json");
+    const store = new StateStore(file);
+    await store.load();
+    await store.upsertRepository({
+      id: "repo_5555555555555555",
+      fullName: "owner/repo",
+      addedAt: "2026-09-17T00:00:00.000Z",
+      enabled: true,
+      chatgptProjectUrl: "https://chatgpt.com/g/g-p-project123/project",
+      chatgptPrConversations: [],
+      webhook: { hookId: null, targetUrl: "", status: "pending" },
+    });
+    await store.updatePullRequestChatConversation("owner/repo", 101, "https://chatgpt.com/c/pr-101-chat");
+    await store.updatePullRequestChatConversation("owner/repo", 102, "https://chatgpt.com/c/pr-102-stays");
+
+    await store.removePullRequestChatConversation("owner/repo", 101, "https://chatgpt.com/c/pr-101-chat");
+
+    expect(store.getPullRequestChatConversation("owner/repo", 101)).toBeUndefined();
+    expect(store.getPullRequestChatConversation("owner/repo", 102)).toBe("https://chatgpt.com/c/pr-102-stays");
+    expect(store.getRepository("owner/repo")?.chatgptProjectUrl).toBe("https://chatgpt.com/g/g-p-project123/project");
+  });
+
   it("clears PR conversations when a missing repository Project is replaced", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "chatgpt-review-project-cas-"));
     cleanup.push(root);

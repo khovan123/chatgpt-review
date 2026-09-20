@@ -324,6 +324,7 @@ export class ReviewEngine {
 
     let record: ReviewRecord | undefined;
     let reviewSlotAcquired = false;
+    const reviewConversationUrls = new Set<string>();
     try {
       this.providerStatus = await this.dependencies.github.status();
       if (!this.providerStatus.ghAuthenticated) throw new Error(this.providerStatus.detail);
@@ -364,6 +365,7 @@ export class ReviewEngine {
       this.assertNotCancelled(record);
       const storedConversationUrl = this.dependencies.state.getPullRequestChatConversation(repository, pr.number);
       const taskStart = await this.dependencies.chatgpt.startTask(taskId, projectUrl, storedConversationUrl);
+      if (taskStart.conversationUrl) reviewConversationUrls.add(taskStart.conversationUrl);
       let staleConversationUrl: string | undefined;
       if (storedConversationUrl && taskStart.fallbackToNewConversation) {
         // One PR owns one canonical conversation inside the repository Project.
@@ -383,6 +385,7 @@ export class ReviewEngine {
         await this.bindPullRequestConversation(record, taskStart.conversationUrl);
       }
       const bindConversation = async (conversationUrl: string) => {
+        reviewConversationUrls.add(conversationUrl);
         if (staleConversationUrl) {
           const expected = staleConversationUrl;
           staleConversationUrl = undefined;
@@ -475,6 +478,7 @@ export class ReviewEngine {
           message,
         }),
         record.taskId,
+        (conversationUrl) => reviewConversationUrls.add(conversationUrl),
       );
 
       const gatewayBinding = await gateway.start();
@@ -567,11 +571,93 @@ export class ReviewEngine {
     } finally {
       if (record) {
         this.dependencies.chatgpt.finishTask(record.taskId);
+        await this.cleanupReviewConversations(record, reviewConversationUrls);
         this.cancelledTasks.delete(record.taskId);
       }
       if (reviewSlotAcquired) this.releaseReviewSlot();
       this.running.delete(key);
     }
+  }
+
+  private async cleanupReviewConversations(record: ReviewRecord, conversationUrls: Set<string>): Promise<void> {
+    if (record.conversationUrl) conversationUrls.add(record.conversationUrl);
+    const urls = [...conversationUrls];
+    if (!urls.length) return;
+
+    this.emit({
+      type: "progress",
+      reviewId: record.id,
+      taskId: record.taskId,
+      repository: record.repository,
+      prNumber: record.prNumber,
+      phase: record.phase,
+      message: `Cleaning up ${urls.length} ChatGPT conversation(s) from the finished review run; the repository Project will be retained.`,
+    });
+
+    const deleted = new Set<string>();
+    const failures: string[] = [];
+    for (const conversationUrl of urls) {
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          await this.dependencies.chatgpt.deleteConversation(conversationUrl);
+          deleted.add(conversationUrl);
+          lastError = undefined;
+          break;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+        }
+      }
+      if (lastError) failures.push(`${conversationUrl}: ${safeError(lastError)}`);
+    }
+
+    const boundConversation = this.dependencies.state.getPullRequestChatConversation(record.repository, record.prNumber);
+    if (boundConversation && deleted.has(boundConversation)) {
+      await this.dependencies.state.removePullRequestChatConversation(
+        record.repository,
+        record.prNumber,
+        boundConversation,
+      ).catch((error) => failures.push(`binding cleanup: ${safeError(error)}`));
+    }
+    if (record.conversationUrl && deleted.has(record.conversationUrl)) {
+      record.conversationUrl = undefined;
+    }
+
+    record.updatedAt = new Date().toISOString();
+    if (failures.length) {
+      const cleanupError = `ChatGPT conversation cleanup failed: ${failures.join(" | ")}`;
+      if (record.status === "completed" || record.status === "blocked") {
+        record.status = "failed";
+        record.phase = "failed";
+        record.error = cleanupError;
+        record.completedAt = record.completedAt ?? record.updatedAt;
+      } else {
+        record.error = record.error ? `${record.error} Cleanup: ${cleanupError}` : cleanupError;
+      }
+      await this.dependencies.state.upsertReview(record).catch(() => undefined);
+      this.emit({
+        type: record.status === "failed" ? "state" : "progress",
+        reviewId: record.id,
+        taskId: record.taskId,
+        repository: record.repository,
+        prNumber: record.prNumber,
+        phase: record.phase,
+        message: cleanupError,
+      });
+      return;
+    }
+
+    await this.dependencies.state.upsertReview(record).catch(() => undefined);
+    this.emit({
+      type: "progress",
+      reviewId: record.id,
+      taskId: record.taskId,
+      repository: record.repository,
+      prNumber: record.prNumber,
+      phase: record.phase,
+      message: `Deleted ${deleted.size} ChatGPT conversation(s) created or used by this review; repository Project retained.`,
+    });
   }
 
   private upsertPrCache(pr: PullRequestSummary): void {

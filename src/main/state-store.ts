@@ -157,6 +157,25 @@ export class StateStore {
     return this.upsertRepository(existing);
   }
 
+  async removePullRequestChatConversation(
+    fullName: string,
+    prNumber: number,
+    expectedConversationUrl?: string,
+  ): Promise<RepositoryRecord> {
+    const existing = this.getRepository(fullName);
+    if (!existing) throw new Error(`Repository ${fullName} is not linked.`);
+    const number = sanitizePrNumber(prNumber);
+    if (expectedConversationUrl) {
+      const expected = sanitizeChatGptConversationUrl(expectedConversationUrl);
+      const current = existing.chatgptPrConversations.find((binding) => binding.prNumber === number)?.conversationUrl ?? "";
+      if (current && current !== expected) {
+        throw new Error(`ChatGPT PR conversation changed concurrently for ${existing.fullName} PR #${number}. Retry the review.`);
+      }
+    }
+    existing.chatgptPrConversations = existing.chatgptPrConversations.filter((binding) => binding.prNumber !== number);
+    return this.upsertRepository(existing);
+  }
+
   listReviews(): ReviewRecord[] {
     return this.state.reviews.map((review) => structuredClone(review));
   }

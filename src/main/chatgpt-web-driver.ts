@@ -138,6 +138,20 @@ export class ChatGptWebDriver {
     window.focus();
   }
 
+  async deleteConversation(conversationUrl: string): Promise<void> {
+    const target = normalizeConversationUrl(conversationUrl);
+    const window = this.createWindow("ChatGPT Review · Conversation Cleanup");
+    try {
+      await window.loadURL(target);
+      const contents = liveWebContents(window);
+      const current = safeConversationUrl(safeWebContentsUrl(contents));
+      if (current && current !== target) return;
+      await deleteConversationFromUi(contents, target);
+    } finally {
+      if (!window.isDestroyed()) window.destroy();
+    }
+  }
+
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     for (const taskId of [...this.taskWindows.keys()]) this.destroyTaskWindow(taskId);
@@ -1244,6 +1258,121 @@ async function trustedSubmitPrompt(contents: WebContents): Promise<boolean> {
   }
   await delay(150);
   return true;
+}
+
+async function deleteConversationFromUi(contents: WebContents, targetUrl: string): Promise<void> {
+  const targetPath = new URL(targetUrl).pathname;
+  const readyDeadline = Date.now() + 15_000;
+  while (Date.now() < readyDeadline) {
+    const current = safeConversationUrl(safeWebContentsUrl(contents));
+    if (!current || current !== targetUrl) return;
+    const ready = await executeJavaScriptSafe<boolean>(contents, `(() => Boolean(document.body && document.querySelector('main, [role="main"], nav, aside')))()`, "waiting for the ChatGPT conversation cleanup page");
+    if (ready) break;
+    await delay(POLL_MS);
+  }
+
+  let opened = false;
+  for (let attempt = 0; attempt < 4 && !opened; attempt += 1) {
+    opened = await executeJavaScriptSafe<boolean>(contents, `(() => {
+      const targetPath = ${JSON.stringify(targetPath)};
+      const normalizePath = (href) => {
+        try {
+          const pathname = new URL(href, location.origin).pathname;
+          return pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
+        } catch { return ''; }
+      };
+      const visible = (node) => node instanceof HTMLElement && node.getClientRects().length > 0;
+      const labels = (node) => [
+        node.getAttribute('aria-label') || '',
+        node.getAttribute('title') || '',
+        node.getAttribute('data-testid') || '',
+        node.textContent || '',
+      ].join(' ').toLowerCase();
+
+      const anchor = Array.from(document.querySelectorAll('a[href]'))
+        .find((node) => normalizePath(node.getAttribute('href') || '') === targetPath);
+      const scopes = [];
+      if (anchor instanceof HTMLElement) {
+        let scope = anchor;
+        for (let depth = 0; depth < 5 && scope; depth += 1) {
+          scopes.push(scope);
+          scope = scope.parentElement;
+        }
+      }
+      for (const scope of scopes) {
+        const button = Array.from(scope.querySelectorAll('button')).find((node) => {
+          const text = labels(node);
+          return visible(node) && /(more|option|menu|action|conversation)/i.test(text)
+            && !/(share|send|voice|microphone|stop)/i.test(text);
+        });
+        if (button instanceof HTMLButtonElement) {
+          button.click();
+          return true;
+        }
+      }
+
+      const global = Array.from(document.querySelectorAll('button')).find((node) => {
+        if (!visible(node)) return false;
+        const text = labels(node);
+        return /(conversation).*(more|option|menu|action)|(more|option|menu|action).*(conversation)/i.test(text)
+          || /^(more|options)$/i.test((node.getAttribute('aria-label') || node.getAttribute('title') || '').trim());
+      });
+      if (global instanceof HTMLButtonElement) {
+        global.click();
+        return true;
+      }
+      return false;
+    })()`, "opening the ChatGPT conversation actions menu");
+    if (!opened) await delay(500);
+  }
+  if (!opened) {
+    const current = safeConversationUrl(safeWebContentsUrl(contents));
+    if (!current || current !== targetUrl) return;
+    throw new Error("ChatGPT conversation delete menu was not found.");
+  }
+
+  await delay(250);
+  const deleteClicked = await executeJavaScriptSafe<boolean>(contents, `(() => {
+    const visible = (node) => node instanceof HTMLElement && node.getClientRects().length > 0;
+    const candidates = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button, [data-testid]'));
+    const item = candidates.find((node) => {
+      if (!(node instanceof HTMLElement) || !visible(node)) return false;
+      const testId = (node.getAttribute('data-testid') || '').toLowerCase();
+      const text = (node.textContent || node.getAttribute('aria-label') || '').trim().toLowerCase();
+      return testId.includes('delete')
+        || /^(delete|delete chat|delete conversation|xóa|xóa cuộc trò chuyện)$/.test(text);
+    });
+    if (!(item instanceof HTMLElement)) return false;
+    item.click();
+    return true;
+  })()`, "selecting Delete for the ChatGPT conversation");
+  if (!deleteClicked) throw new Error("ChatGPT conversation Delete action was not found.");
+
+  await delay(250);
+  const confirmed = await executeJavaScriptSafe<boolean>(contents, `(() => {
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [data-testid*="modal"], [data-testid*="dialog"]'));
+    const dialog = dialogs.find((node) => node instanceof HTMLElement && node.getClientRects().length > 0);
+    if (!(dialog instanceof HTMLElement)) return false;
+    const buttons = Array.from(dialog.querySelectorAll('button'));
+    const confirm = buttons.find((node) => {
+      if (!(node instanceof HTMLButtonElement) || node.disabled) return false;
+      const testId = (node.getAttribute('data-testid') || '').toLowerCase();
+      const text = (node.textContent || node.getAttribute('aria-label') || '').trim().toLowerCase();
+      return testId.includes('delete') || /^(delete|delete chat|delete conversation|xóa|xóa cuộc trò chuyện)$/.test(text);
+    });
+    if (!(confirm instanceof HTMLButtonElement)) return false;
+    confirm.click();
+    return true;
+  })()`, "confirming ChatGPT conversation deletion");
+  if (!confirmed) throw new Error("ChatGPT conversation deletion confirmation was not found.");
+
+  const deletedDeadline = Date.now() + 15_000;
+  while (Date.now() < deletedDeadline) {
+    await delay(250);
+    const current = safeConversationUrl(safeWebContentsUrl(contents));
+    if (!current || current !== targetUrl) return;
+  }
+  throw new Error("ChatGPT conversation deletion was not confirmed by navigation away from the deleted chat.");
 }
 
 async function userMessageCount(contents: WebContents): Promise<number> {

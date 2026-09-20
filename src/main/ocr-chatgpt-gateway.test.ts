@@ -109,6 +109,43 @@ describe("OCR ChatGPT Web OpenAI gateway", () => {
     }
   });
 
+  it("reports OCR child conversation URLs as soon as ChatGPT establishes them", async () => {
+    const conversations: string[] = [];
+    const fakeDriver = {
+      startTask: async () => ({ conversationUrl: null, fallbackToNewConversation: false }),
+      send: async (_taskId: string, _prompt: string, onConversationUrl?: (url: string) => void) => {
+        onConversationUrl?.("https://chatgpt.com/c/ocr-child");
+        throw new Error("simulated downstream failure after conversation creation");
+      },
+      finishTask: () => undefined,
+    };
+    const gateway = new OcrChatGptGateway(
+      fakeDriver as any,
+      "https://chatgpt.com/g/g-p-fake/project",
+      undefined,
+      "review_0123456789abcdef",
+      (url) => conversations.push(url),
+    );
+    const binding = await gateway.start();
+    try {
+      const response = await fetch(`${binding.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${binding.token}`,
+        },
+        body: JSON.stringify({
+          model: binding.model,
+          messages: [{ role: "user", content: "review" }],
+        }),
+      });
+      expect(response.status).toBe(500);
+      expect(conversations).toEqual(["https://chatgpt.com/c/ocr-child"]);
+    } finally {
+      await gateway.stop();
+    }
+  });
+
   it("maps structured ChatGPT Web output into native OpenAI tool calls", () => {
     const parsed = parseToolCallingResponse(
       "[OCR_OPENAI_RESPONSE]\\n{\"content\":\"\",\"tool_calls\":[{\"id\":\"call_1\",\"name\":\"file_read\",\"arguments\":{\"path\":\"src/a.ts\"}}]}\\n[/OCR_OPENAI_RESPONSE]".replaceAll("\\n", "\n"),

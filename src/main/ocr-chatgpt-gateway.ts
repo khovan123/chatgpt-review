@@ -59,6 +59,7 @@ export class OcrChatGptGateway {
     private readonly projectUrl: string,
     private readonly onProgress?: (message: string) => void,
     private readonly parentTaskId = "",
+    private readonly onConversation?: (conversationUrl: string) => void,
   ) {}
 
   async start(): Promise<OcrChatGptGatewayBinding> {
@@ -166,7 +167,10 @@ export class OcrChatGptGateway {
     );
     await this.chatgpt.startTask(taskId, this.projectUrl);
     try {
-      const web = await this.chatgpt.send(taskId, prompt);
+      const web = await this.chatgpt.send(taskId, prompt, (conversationUrl) => {
+        this.onConversation?.(conversationUrl);
+      });
+      this.onConversation?.(web.conversationUrl);
       const assistant = tools.length
         ? parseToolCallingResponse(web.text, tools)
         : { content: web.text, toolCalls: [] as NativeToolCall[] };
