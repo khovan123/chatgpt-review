@@ -233,6 +233,7 @@ export class ChatGptWebDriver {
         contextIsolation: true,
         sandbox: true,
         webSecurity: true,
+        webgl: false,
         spellcheck: false,
         devTools: false,
       },

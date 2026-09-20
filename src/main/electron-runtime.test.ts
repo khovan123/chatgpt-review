@@ -8,14 +8,17 @@ describe("Electron runtime rendering policy", () => {
     const source = await readFile(path.join(process.cwd(), "src", "main.ts"), "utf8");
 
     expect(source).toContain('process.env.CHATGPT_REVIEW_DISABLE_GPU');
-    expect(source).toContain('process.platform === "linux"');
-    expect(source).toContain('Boolean(process.env.DISPLAY)');
-    expect(source).toContain('!process.env.XDG_SESSION_TYPE');
+    expect(source).toContain('process.platform === "linux" && !explicitlyEnabled');
+    expect(source).not.toContain('Boolean(process.env.DISPLAY)');
+    expect(source).not.toContain('!process.env.XDG_SESSION_TYPE');
     expect(source).toContain("app.disableHardwareAcceleration()");
     expect(source).toContain('app.commandLine.appendSwitch("disable-gpu")');
     expect(source).toContain('app.commandLine.appendSwitch("disable-gpu-compositing")');
+    expect(source).toContain('app.commandLine.appendSwitch("disable-software-rasterizer")');
     expect(source).toContain('app.commandLine.appendSwitch("disable-webgl")');
     expect(source).toContain('app.commandLine.appendSwitch("disable-webgl2")');
+    expect(source).toContain('app.commandLine.appendSwitch("use-gl", "disabled")');
+    expect(source).toContain("webgl: false");
 
     const configureIndex = source.indexOf("configureElectronRendering();");
     const readyIndex = source.indexOf("app.whenReady()");

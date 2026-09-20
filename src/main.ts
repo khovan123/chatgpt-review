@@ -37,16 +37,20 @@ function configureElectronRendering(): void {
   const override = process.env.CHATGPT_REVIEW_DISABLE_GPU?.trim().toLowerCase();
   const forced = override === "1" || override === "true" || override === "yes";
   const explicitlyEnabled = override === "0" || override === "false" || override === "no";
-  const headlessLinuxWorker = process.platform === "linux"
-    && Boolean(process.env.DISPLAY)
-    && !process.env.XDG_SESSION_TYPE;
-  if (explicitlyEnabled || (!forced && !headlessLinuxWorker)) return;
+  const disableGpu = forced || (process.platform === "linux" && !explicitlyEnabled);
+  if (!disableGpu) return;
 
+  // chatgpt-review does not require WebGL. On Linux servers (PM2 + Xvfb),
+  // Chromium may otherwise spawn a GPU/software-GL path and repeatedly emit
+  // ContextResult::kFatalFailure: WebGL1 blocklisted even though the UI works.
+  // Disable both hardware and software GL paths before app readiness.
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch("disable-gpu");
   app.commandLine.appendSwitch("disable-gpu-compositing");
+  app.commandLine.appendSwitch("disable-software-rasterizer");
   app.commandLine.appendSwitch("disable-webgl");
   app.commandLine.appendSwitch("disable-webgl2");
+  app.commandLine.appendSwitch("use-gl", "disabled");
 }
 
 void app.whenReady().then(async () => {
@@ -148,6 +152,7 @@ function createMainWindow(): BrowserWindow {
       contextIsolation: true,
       sandbox: true,
       webSecurity: true,
+      webgl: false,
       devTools: false,
     },
   });

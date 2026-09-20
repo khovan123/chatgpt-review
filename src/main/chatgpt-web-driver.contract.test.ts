@@ -18,6 +18,7 @@ describe("ChatGPT Web review-session lifecycle", () => {
     expect(driver).toContain("event.preventDefault()");
     expect(driver).toContain("window.hide()");
     expect(driver).toContain("private readonly taskWindows = new Map<string, BrowserWindow>()");
+    expect(driver).toContain("webgl: false");
     expect(driver).toContain('import { isValidReviewTaskId } from "./review-activity"');
     expect(driver).toContain("if (!isValidReviewTaskId(value))");
     expect(driver).toContain("destroyTaskWindow(taskId)");
