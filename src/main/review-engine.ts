@@ -17,6 +17,7 @@ import { SpecMemoryStore } from "./spec-memory";
 import { makeRepository, StateStore } from "./state-store";
 import type {
   AppView,
+  GitHubPullRequestGate,
   JiraResolution,
   PullRequestSummary,
   RepositoryRecord,
@@ -27,6 +28,10 @@ import { shouldTriggerPullRequestReview, type GitHubWebhookEvent } from "./webho
 
 const JIRA_FORMAT_RETRIES = 2;
 const MAX_CONCURRENT_REVIEWS = 3;
+const CI_POLL_INTERVAL_MS = 10_000;
+const CI_DISCOVERY_GRACE_MS = 60_000;
+const CI_SETTLE_MS = 10_000;
+const CI_WAIT_TIMEOUT_MS = 2 * 60 * 60_000;
 
 export interface ReviewEngineEvent {
   type: "state" | "progress";
@@ -216,13 +221,8 @@ export class ReviewEngine {
     this.scheduled.add(key);
     const execution = (async () => {
       while (this.running.has(key)) await new Promise((resolve) => setTimeout(resolve, 250));
-      await this.acquireReviewSlot();
       this.scheduled.delete(key);
-      try {
-        return await this.reviewNow(linked.fullName, prNumber, force, trigger);
-      } finally {
-        this.releaseReviewSlot();
-      }
+      return this.reviewNow(linked.fullName, prNumber, force, trigger);
     })();
     void execution.catch(() => {
       this.scheduled.delete(key);
@@ -323,6 +323,7 @@ export class ReviewEngine {
     this.running.add(key);
 
     let record: ReviewRecord | undefined;
+    let reviewSlotAcquired = false;
     try {
       this.providerStatus = await this.dependencies.github.status();
       if (!this.providerStatus.ghAuthenticated) throw new Error(this.providerStatus.detail);
@@ -352,7 +353,13 @@ export class ReviewEngine {
       };
       await this.dependencies.state.upsertReview(record);
       await this.setPhase(record, "collecting-pr", `Collected ${repository} PR #${pr.number} at exact head ${pr.headSha.slice(0, 12)}.`);
+      record.githubGate = await this.waitForExactHeadCi(record, pr.headSha);
+      record.updatedAt = new Date().toISOString();
+      await this.dependencies.state.upsertReview(record);
 
+      await this.setPhase(record, "queued", `Exact-head CI is complete; waiting for an available review execution slot.`);
+      await this.acquireReviewSlot();
+      reviewSlotAcquired = true;
       const projectUrl = await this.ensureRepositoryProject(repository);
       this.assertNotCancelled(record);
       const storedConversationUrl = this.dependencies.state.getPullRequestChatConversation(repository, pr.number);
@@ -454,7 +461,7 @@ export class ReviewEngine {
       const topSpec = this.dependencies.specs.search(globalQuery, 10);
 
       await this.setPhase(record, "reviewing-diff", "OpenCodeReview managed agent is reviewing the exact PR head through the local ChatGPT Web LLM gateway.");
-      const ocrBackground = buildOpenCodeReviewBackground({ pr, jira, spec: topSpec });
+      const ocrBackground = buildOpenCodeReviewBackground({ pr, jira, spec: topSpec, githubGate: record.githubGate });
       const gateway = new OcrChatGptGateway(
         this.dependencies.chatgpt,
         projectUrl,
@@ -495,6 +502,10 @@ export class ReviewEngine {
       if (!record.result) throw new Error("OpenCodeReview managed review did not produce a normalized result.");
       this.assertNotCancelled(record);
 
+      record.githubGate = await this.waitForExactHeadCi(record, pr.headSha, 0, "before-publish");
+      record.updatedAt = new Date().toISOString();
+      await this.dependencies.state.upsertReview(record);
+
       const blockedReason = record.result.verdict === "BLOCKED"
         ? (record.result.summary || "ChatGPT marked the review blocked by missing evidence.")
         : "";
@@ -506,7 +517,7 @@ export class ReviewEngine {
         const submission = await this.dependencies.github.submitPullRequestReview(
           repository,
           pr.number,
-          reviewMarkdown(record.result, pr, jira, record.ocr, existing ? { headSha: existing.headSha, result: existing.result } : undefined),
+          reviewMarkdown(record.result, pr, jira, record.ocr, record.githubGate, existing ? { headSha: existing.headSha, result: existing.result } : undefined),
           reviewEvent,
         );
         this.assertNotCancelled(record);
@@ -557,6 +568,7 @@ export class ReviewEngine {
         this.dependencies.chatgpt.finishTask(record.taskId);
         this.cancelledTasks.delete(record.taskId);
       }
+      if (reviewSlotAcquired) this.releaseReviewSlot();
       this.running.delete(key);
     }
   }
@@ -663,6 +675,130 @@ export class ReviewEngine {
     next?.();
   }
 
+  private async waitForExactHeadCi(
+    record: ReviewRecord,
+    expectedHeadSha: string,
+    discoveryGraceMs = CI_DISCOVERY_GRACE_MS,
+    purpose: "before-review" | "before-publish" = "before-review",
+  ): Promise<GitHubPullRequestGate> {
+    await this.setPhase(
+      record,
+      "waiting-ci",
+      purpose === "before-review"
+        ? `Waiting for all GitHub CI checks on exact head ${expectedHeadSha.slice(0, 12)} to finish before review.`
+        : `Re-checking GitHub CI on exact head ${expectedHeadSha.slice(0, 12)} before publishing the review result.`,
+    );
+    const startedAt = Date.now();
+    let stableSince = 0;
+    let stableFingerprint = "";
+
+    while (true) {
+      this.assertNotCancelled(record);
+      const gate = await this.dependencies.github.getPullRequestGate(record.repository, record.prNumber);
+      if (gate.headSha.toLowerCase() !== expectedHeadSha.toLowerCase()) {
+        await this.cancelSupersededReview(record, gate.headSha);
+        throw new Error("Review superseded by a newer PR head.");
+      }
+
+      record.githubGate = gate;
+      record.updatedAt = new Date().toISOString();
+      await this.dependencies.state.upsertReview(record);
+
+      const elapsed = Date.now() - startedAt;
+      if (!gate.checks.length) {
+        stableFingerprint = "";
+        stableSince = 0;
+        if (elapsed >= discoveryGraceMs) {
+          this.emit({
+            type: "progress",
+            reviewId: record.id,
+            taskId: record.taskId,
+            repository: record.repository,
+            prNumber: record.prNumber,
+            phase: "waiting-ci",
+            message: `No GitHub CI checks were registered for exact head ${expectedHeadSha.slice(0, 12)} after the discovery grace period; continuing review.`,
+          });
+          return gate;
+        }
+        this.emit({
+          type: "progress",
+          reviewId: record.id,
+          taskId: record.taskId,
+          repository: record.repository,
+          prNumber: record.prNumber,
+          phase: "waiting-ci",
+          message: `Waiting for GitHub CI checks to register for exact head ${expectedHeadSha.slice(0, 12)}.`,
+        });
+      } else if (!gate.allChecksComplete) {
+        stableFingerprint = "";
+        stableSince = 0;
+        const pending = gate.checks.filter((check) => check.status !== "COMPLETED").length;
+        this.emit({
+          type: "progress",
+          reviewId: record.id,
+          taskId: record.taskId,
+          repository: record.repository,
+          prNumber: record.prNumber,
+          phase: "waiting-ci",
+          message: `Waiting for ${pending}/${gate.checks.length} GitHub CI check(s) on exact head ${expectedHeadSha.slice(0, 12)}.`,
+        });
+      } else {
+        const fingerprint = ciGateFingerprint(gate);
+        if (fingerprint !== stableFingerprint) {
+          stableFingerprint = fingerprint;
+          stableSince = Date.now();
+          this.emit({
+            type: "progress",
+            reviewId: record.id,
+            taskId: record.taskId,
+            repository: record.repository,
+            prNumber: record.prNumber,
+            phase: "waiting-ci",
+            message: `All ${gate.checks.length} GitHub CI check(s) are terminal; waiting briefly for dependent checks to register.`,
+          });
+        } else if (Date.now() - stableSince >= CI_SETTLE_MS) {
+          this.emit({
+            type: "progress",
+            reviewId: record.id,
+            taskId: record.taskId,
+            repository: record.repository,
+            prNumber: record.prNumber,
+            phase: "waiting-ci",
+            message: purpose === "before-review"
+              ? `Exact-head CI finished with ${gate.ciConclusion}; GitHub mergeable=${gate.mergeable}. Starting review.`
+              : `Exact-head CI re-check finished with ${gate.ciConclusion}; GitHub mergeable=${gate.mergeable}. Finalizing review output.`,
+          });
+          return gate;
+        }
+      }
+
+      if (elapsed >= CI_WAIT_TIMEOUT_MS) {
+        throw new Error(`Timed out waiting for all GitHub CI checks on exact head ${expectedHeadSha.slice(0, 12)} to finish.`);
+      }
+      await sleep(CI_POLL_INTERVAL_MS);
+    }
+  }
+
+  private async cancelSupersededReview(record: ReviewRecord, currentHeadSha: string): Promise<void> {
+    this.cancelledTasks.add(record.taskId);
+    const now = new Date().toISOString();
+    record.status = "cancelled";
+    record.phase = "cancelled";
+    record.error = `Review superseded: expected head ${record.headSha.slice(0, 12)}, current GitHub head is ${currentHeadSha.slice(0, 12)}.`;
+    record.updatedAt = now;
+    record.completedAt = now;
+    await this.dependencies.state.upsertReview(record);
+    this.emit({
+      type: "state",
+      reviewId: record.id,
+      taskId: record.taskId,
+      repository: record.repository,
+      prNumber: record.prNumber,
+      phase: "cancelled",
+      message: record.error,
+    });
+  }
+
   private async setPhase(record: ReviewRecord, phase: ReviewPhase, message: string): Promise<void> {
     this.assertNotCancelled(record);
     record.status = phase === "blocked" ? "blocked" : phase === "failed" ? "failed" : phase === "cancelled" ? "cancelled" : phase === "completed" ? "completed" : "running";
@@ -693,6 +829,17 @@ export class ReviewEngine {
   private emit(event: ReviewEngineEvent): void {
     this.dependencies.onEvent?.(event);
   }
+}
+
+function ciGateFingerprint(gate: GitHubPullRequestGate): string {
+  return gate.checks
+    .map((check) => [check.workflow, check.name, check.status, check.conclusion].join("\u0000"))
+    .sort()
+    .join("\u0001");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isRetryableJiraFormatError(error: unknown): boolean {

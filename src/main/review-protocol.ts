@@ -1,4 +1,4 @@
-import type { GitHubPullRequestReviewEvent, JiraResolution, OcrReviewMetadata, ParsedReviewResult, PullRequestSummary, RetrievedSpecChunk, ReviewFinding } from "./types";
+import type { GitHubPullRequestGate, GitHubPullRequestReviewEvent, JiraResolution, OcrReviewMetadata, ParsedReviewResult, PullRequestSummary, RetrievedSpecChunk, ReviewFinding } from "./types";
 
 export function extractJiraKeys(title: string, body: string): string[] {
   const pattern = /\b[A-Z][A-Z0-9]{1,15}-\d+\b/g;
@@ -71,6 +71,7 @@ export function buildOpenCodeReviewBackground(input: {
   pr: PullRequestSummary;
   jira: JiraResolution;
   spec: RetrievedSpecChunk[];
+  githubGate?: GitHubPullRequestGate;
 }): string {
   const jiraText = input.jira.issues.length
     ? input.jira.issues.map((issue) => [
@@ -81,9 +82,21 @@ export function buildOpenCodeReviewBackground(input: {
     ].filter(Boolean).join("\n")).join("\n\n")
     : "No resolved Jira requirements.";
   const specText = input.spec.length ? renderSpecMemory(input.spec) : "No attached spec context.";
+  const githubGateText = input.githubGate
+    ? truncateUtf8([
+      `Exact-head GitHub gate: head=${input.githubGate.headSha}; ci=${input.githubGate.ciConclusion}; allChecksComplete=${input.githubGate.allChecksComplete}; mergeable=${input.githubGate.mergeable}`,
+      ...[...input.githubGate.checks]
+        .sort((left, right) => ciCheckPriority(left) - ciCheckPriority(right))
+        .slice(0, 30)
+        .map((check) =>
+          `${check.workflow || "Status"} :: ${check.name} :: status=${check.status} :: conclusion=${check.conclusion || "NONE"}`
+        ),
+    ].join("\n"), 2_500)
+    : "Exact-head GitHub CI/mergeability data unavailable.";
   return truncateUtf8([
     `PR #${input.pr.number}: ${input.pr.title}`,
     truncateUtf8(input.pr.body, 2_000),
+    `Exact-head GitHub CI and mergeability:\n${githubGateText}`,
     `Jira context:\n${jiraText}`,
     `Optional spec context:\n${specText}`,
     "Review reporting contract: for every concrete finding, keep the finding content concise and use these exact markdown headings on separate lines when the information is supported: Checkpoint, Root cause, Impact, Evidence, Suggested fix, Regression tests. Use suggestion_code only for a literal code replacement. Do not invent a blocker, root cause, test result, or Jira mapping that is not supported by repository evidence.",
@@ -104,6 +117,7 @@ export function reviewMarkdown(
   pr: PullRequestSummary,
   jira: JiraResolution,
   ocr?: OcrReviewMetadata,
+  githubGate?: GitHubPullRequestGate,
   previous?: PreviousReviewContext,
 ): string {
   const blockerFindings = result.findings.filter((finding) => finding.severity === "P0" || finding.severity === "P1" || finding.severity === "P2");
@@ -113,7 +127,7 @@ export function reviewMarkdown(
     ? `${jiraIssue.key} — ${jiraIssue.summary}`
     : jira.primaryKey ?? (jira.status === "no-key" ? "No Jira key found" : jira.status.toUpperCase());
   const reviewEvent = githubReviewEventForVerdict(result.verdict);
-  const mergeStatus = result.verdict === "PASS" ? "✅ READY" : result.verdict === "BLOCKED" ? "⛔ BLOCKED" : "❌ CHANGES REQUIRED";
+  const mergeStatus = mergeStatusFor(result, githubGate);
   const titleIcon = result.verdict === "PASS" ? "✅" : result.verdict === "BLOCKED" ? "⛔" : "❌";
   const reviewLabel = jiraIssue ? `${jiraIssue.key} ${jiraIssue.summary}` : pr.title;
   const heading = result.verdict === "PASS"
@@ -127,6 +141,8 @@ export function reviewMarkdown(
     "",
     `**Exact HEAD reviewed:** ${pr.headSha}`,
     `**Jira source of truth:** ${jiraSource}`,
+    `**Exact-head CI:** ${ciStatusLabel(githubGate)}`,
+    `**GitHub mergeable:** ${mergeabilityStatusLabel(githubGate)}`,
     `**Review engine:** ${ocr ? `OpenCodeReview v${ocr.version} managed agent + ChatGPT Web LLM gateway` : "ChatGPT Web legacy diff review"}`,
     ...(ocr ? [`**OCR coverage:** ${ocr.reviewedFiles}/${ocr.reviewableFiles} reviewable files reviewed; ${ocr.excludedFiles} explicitly excluded.`, `**OCR runtime:** ${ocr.status || "unknown"} · model ${ocr.model || "chatgpt-web"} · ${ocr.toolCalls ?? 0} tool call(s) · ${ocr.toolCallFailures ?? 0} failure(s).`] : []),
     "",
@@ -142,9 +158,11 @@ export function reviewMarkdown(
     "",
     "| # | Review checkpoint | Result |",
     "|---|---|---|",
-    ...checkpointRows(result, jira, ocr),
+    ...checkpointRows(result, jira, ocr, githubGate),
     "",
     renderReviewedChanges(pr, jira, result, ocr),
+    "",
+    renderCiDetails(githubGate),
     "",
   ];
 
@@ -191,7 +209,7 @@ function previousBlockerLines(result: ParsedReviewResult, previous?: PreviousRev
   });
 }
 
-function checkpointRows(result: ParsedReviewResult, jira: JiraResolution, ocr?: OcrReviewMetadata): string[] {
+function checkpointRows(result: ParsedReviewResult, jira: JiraResolution, ocr?: OcrReviewMetadata, githubGate?: GitHubPullRequestGate): string[] {
   const criteria = extractJiraCriteria(jira);
   const rows: string[] = [];
   let index = 1;
@@ -202,6 +220,8 @@ function checkpointRows(result: ParsedReviewResult, jira: JiraResolution, ocr?: 
     ? (ocr.reviewedFiles >= ocr.reviewableFiles && ocr.toolCallFailures === 0 ? "✅" : `⚠️ ${ocr.reviewedFiles}/${ocr.reviewableFiles}; ${ocr.toolCallFailures} tool failure(s)`)
     : "ℹ️ OCR metadata unavailable";
   rows.push(`| ${index++} | Exact-head review coverage | ${coverage} |`);
+  rows.push(`| ${index++} | Exact-head CI | ${escapeTableCell(ciStatusLabel(githubGate))} |`);
+  rows.push(`| ${index++} | GitHub mergeability | ${escapeTableCell(mergeabilityStatusLabel(githubGate))} |`);
   rows.push(`| ${index++} | No P0–P2 security regression | ${securityResult(result)} |`);
   rows.push(`| ${index++} | Test / regression assessment | ${escapeTableCell(result.testAssessment || "Not separately executed by this runner.")} |`);
   if (!criteria.length) {
@@ -235,6 +255,74 @@ function extractJiraCriteria(jira: JiraResolution): string[] {
     result.push(...(lines.length ? lines : [raw]));
   }
   return [...new Set(result)].slice(0, 24);
+}
+
+function ciCheckPriority(check: GitHubPullRequestGate["checks"][number]): number {
+  if (check.status !== "COMPLETED") return 0;
+  if (!["SUCCESS", "NEUTRAL", "SKIPPED"].includes(check.conclusion)) return 1;
+  return 2;
+}
+
+function ciStatusLabel(gate?: GitHubPullRequestGate): string {
+  if (!gate) return "⚠️ unavailable";
+  if (!gate.checks.length) return "ℹ️ no checks registered";
+  const complete = gate.checks.filter((check) => check.status === "COMPLETED").length;
+  if (!gate.allChecksComplete || gate.ciConclusion === "pending") return `⏳ pending (${complete}/${gate.checks.length} complete)`;
+  if (gate.ciConclusion === "success") return `✅ success (${gate.checks.length}/${gate.checks.length} complete)`;
+  const failed = gate.checks.filter((check) => !["SUCCESS", "NEUTRAL", "SKIPPED"].includes(check.conclusion)).length;
+  return `❌ failure (${failed} failed; ${gate.checks.length}/${gate.checks.length} complete)`;
+}
+
+function mergeabilityStatusLabel(gate?: GitHubPullRequestGate): string {
+  if (!gate) return "⚠️ unavailable";
+  if (gate.mergeable === "MERGEABLE") return "✅ MERGEABLE";
+  if (gate.mergeable === "CONFLICTING") return "❌ CONFLICTING";
+  return "⚠️ UNKNOWN";
+}
+
+function mergeStatusFor(result: ParsedReviewResult, gate?: GitHubPullRequestGate): string {
+  if (result.verdict === "BLOCKED") return "⛔ BLOCKED";
+  if (result.verdict !== "PASS") return "❌ CHANGES REQUIRED";
+  if (!gate) return "⚠️ REVIEW PASS — GitHub gate unavailable";
+  if (!gate.allChecksComplete || gate.ciConclusion === "pending") return "⏳ NOT READY — exact-head CI pending";
+  if (gate.ciConclusion === "failure") return "❌ NOT READY — exact-head CI failed";
+  if (gate.mergeable === "CONFLICTING") return "❌ NOT READY — GitHub reports merge conflicts";
+  if (gate.mergeable === "UNKNOWN") return "⚠️ REVIEW PASS — GitHub mergeability unknown";
+  return "✅ READY";
+}
+
+function renderCiDetails(gate?: GitHubPullRequestGate): string {
+  if (!gate) {
+    return [
+      "<details>",
+      "<summary><strong>🧪 Exact-head CI details</strong> — unavailable</summary>",
+      "",
+      "GitHub CI / mergeability data was not available for this review.",
+      "",
+      "</details>",
+    ].join("\n");
+  }
+  const lines = [
+    "<details>",
+    `<summary><strong>🧪 Exact-head CI details</strong> — ${escapeDetailsSummary(ciStatusLabel(gate))} · ${escapeDetailsSummary(mergeabilityStatusLabel(gate))}</summary>`,
+    "",
+    `- **Checked head:** ${gate.headSha}`,
+    `- **Checked at:** ${gate.checkedAt}`,
+    "",
+  ];
+  if (!gate.checks.length) {
+    lines.push("No CI checks were registered for this exact head.");
+  } else {
+    lines.push("| Workflow | Check | Status | Conclusion |", "|---|---|---|---|");
+    for (const check of gate.checks.slice(0, 80)) {
+      const name = check.detailsUrl
+        ? `[${escapeTableCell(check.name)}](${check.detailsUrl})`
+        : escapeTableCell(check.name);
+      lines.push(`| ${escapeTableCell(check.workflow || "—")} | ${name} | ${escapeTableCell(check.status)} | ${escapeTableCell(check.conclusion || "—")} |`);
+    }
+  }
+  lines.push("", "</details>");
+  return lines.join("\n");
 }
 
 function securityResult(result: ParsedReviewResult): string {

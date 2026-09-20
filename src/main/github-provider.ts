@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
-import type { GitHubPullRequestReviewEvent, PullRequestSummary } from "./types";
+import type { GitHubCheckStatus, GitHubPullRequestGate, GitHubPullRequestReviewEvent, PullRequestSummary } from "./types";
 
 const execFileAsync = promisify(execFile);
 const MAX_STDOUT = 16 * 1024 * 1024;
@@ -70,6 +70,16 @@ export class GitHubProvider {
       "--json", "number,title,body,url,headRefOid,headRefName,baseRefName,isDraft,state,author,files",
     ]);
     return parsePullRequest(repository, JSON.parse(raw));
+  }
+
+  async getPullRequestGate(repository: string, prNumber: number): Promise<GitHubPullRequestGate> {
+    assertRepository(repository);
+    assertPrNumber(prNumber);
+    const raw = await runGh([
+      "pr", "view", String(prNumber), "-R", repository,
+      "--json", "headRefOid,mergeable,statusCheckRollup",
+    ]);
+    return parsePullRequestGate(JSON.parse(raw));
   }
 
   async getPullRequestDiff(repository: string, prNumber: number): Promise<string> {
@@ -272,6 +282,20 @@ function ghEnvironment(): NodeJS.ProcessEnv {
   };
 }
 
+function checkText(value: unknown, maxLength: number): string {
+  return optionalText(value, maxLength).replace(/[\r\n\0]+/g, " ").trim();
+}
+
+function safeHttps(value: unknown): string {
+  if (typeof value !== "string") return "";
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
 function assertReviewEvent(event: GitHubPullRequestReviewEvent): void {
   if (event !== "APPROVE" && event !== "REQUEST_CHANGES" && event !== "COMMENT") {
     throw new Error("Pull request review event is invalid.");
@@ -281,6 +305,58 @@ function assertReviewEvent(event: GitHubPullRequestReviewEvent): void {
 export function isSelfReviewRejection(error: unknown): boolean {
   const message = safeError(error).toLowerCase();
   return /own pull request|pull request author|cannot approve|can not approve|can't approve|cannot request changes|can not request changes|can't request changes/.test(message);
+}
+
+export function parsePullRequestGate(value: unknown): GitHubPullRequestGate {
+  if (!isRecord(value)) throw new Error("GitHub CLI returned an invalid pull request gate object.");
+  const checksValue = Array.isArray(value.statusCheckRollup) ? value.statusCheckRollup : [];
+  const checks = checksValue.flatMap((entry): GitHubCheckStatus[] => {
+    if (!isRecord(entry)) return [];
+    const typename = optionalText(entry.__typename, 64);
+    if (typename === "CheckRun" || typeof entry.name === "string") {
+      const status = optionalText(entry.status, 64).toUpperCase() || "UNKNOWN";
+      const conclusion = optionalText(entry.conclusion, 64).toUpperCase();
+      return [{
+        name: checkText(entry.name, 512) || "Unnamed check",
+        workflow: checkText(entry.workflowName, 512),
+        status,
+        conclusion,
+        detailsUrl: safeHttps(entry.detailsUrl),
+      }];
+    }
+    if (typename === "StatusContext" || typeof entry.context === "string") {
+      const state = optionalText(entry.state, 64).toUpperCase() || "UNKNOWN";
+      const terminal = ["SUCCESS", "FAILURE", "ERROR"].includes(state);
+      return [{
+        name: checkText(entry.context, 512) || "Unnamed status",
+        workflow: "Status",
+        status: terminal ? "COMPLETED" : state,
+        conclusion: terminal ? state : "",
+        detailsUrl: safeHttps(entry.targetUrl),
+      }];
+    }
+    return [];
+  });
+  const allChecksComplete = checks.every((check) => check.status === "COMPLETED");
+  const ciConclusion: GitHubPullRequestGate["ciConclusion"] = checks.length === 0
+    ? "no-checks"
+    : !allChecksComplete
+      ? "pending"
+      : checks.some((check) => !["SUCCESS", "NEUTRAL", "SKIPPED"].includes(check.conclusion))
+        ? "failure"
+        : "success";
+  const mergeableRaw = optionalText(value.mergeable, 64).toUpperCase();
+  const mergeable: GitHubPullRequestGate["mergeable"] = mergeableRaw === "MERGEABLE" || mergeableRaw === "CONFLICTING"
+    ? mergeableRaw
+    : "UNKNOWN";
+  return {
+    headSha: requiredSha(value.headRefOid),
+    mergeable,
+    checks,
+    allChecksComplete,
+    ciConclusion,
+    checkedAt: new Date().toISOString(),
+  };
 }
 
 function parsePullRequest(repository: string, value: unknown): PullRequestSummary {

@@ -263,6 +263,10 @@ function renderReviews(pr) {
         evidenceItem("Jira", review.result.jiraAlignment || "—"),
         evidenceItem("Spec", review.result.specAlignment || "—"),
         evidenceItem("Tests", review.result.testAssessment || "—"),
+        evidenceItem("Exact-head CI", review.githubGate
+          ? `${review.githubGate.ciConclusion} · ${review.githubGate.checks?.length || 0} check(s)`
+          : "—"),
+        evidenceItem("Mergeable", review.githubGate?.mergeable || "—"),
       );
       body.append(evidence);
 

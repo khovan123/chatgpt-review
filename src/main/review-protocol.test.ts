@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildJiraRepairPrompt,
+  buildOpenCodeReviewBackground,
   extractJiraKeys,
   githubReviewEventForVerdict,
   parseJiraResolution,
@@ -137,6 +138,15 @@ AC two","status":"Open"}],"notes":"ok"}
     };
 
     const markdown = reviewMarkdown(result, pr, jira, ocr, {
+      headSha: "a".repeat(40),
+      mergeable: "MERGEABLE",
+      checks: [
+        { name: "Tests", workflow: "CI", status: "COMPLETED", conclusion: "SUCCESS", detailsUrl: "https://github.com/example/repo/actions/runs/1" },
+      ],
+      allChecksComplete: true,
+      ciConclusion: "success",
+      checkedAt: "2026-09-20T10:00:00Z",
+    }, {
       headSha: "b".repeat(40),
       result: {
         verdict: "CHANGES_REQUESTED",
@@ -152,6 +162,9 @@ AC two","status":"Open"}],"notes":"ok"}
     expect(markdown).toContain("Bug found");
     expect(markdown).toContain("Exact HEAD reviewed:** " + "a".repeat(40));
     expect(markdown).toContain("Jira source of truth:** LCSP-42 — Harden auth");
+    expect(markdown).toContain("Exact-head CI:** ✅ success (1/1 complete)");
+    expect(markdown).toContain("GitHub mergeable:** ✅ MERGEABLE");
+    expect(markdown).toContain("🧪 Exact-head CI details");
     expect(markdown).toContain("OpenCodeReview v1.12.5 managed agent + ChatGPT Web LLM gateway");
     expect(markdown).toContain("OCR coverage:** 1/1 reviewable files reviewed; 1 explicitly excluded.");
     expect(markdown).toContain("OCR runtime:** complete · model chatgpt-web · 9 tool call(s) · 0 failure(s).");
@@ -222,15 +235,111 @@ AC two","status":"Open"}],"notes":"ok"}
       toolCalls: 18,
       toolCallFailures: 0,
       excluded: [{ path: "docs/notes.md", reason: "unsupported_ext" }],
+    }, {
+      headSha: "9".repeat(40),
+      mergeable: "MERGEABLE",
+      checks: [
+        { name: "Require Jira issue key", workflow: "Jira PR Link", status: "COMPLETED", conclusion: "SUCCESS", detailsUrl: "" },
+        { name: "Tests", workflow: "Tests", status: "COMPLETED", conclusion: "SUCCESS", detailsUrl: "" },
+      ],
+      allChecksComplete: true,
+      ciConclusion: "success",
+      checkedAt: "2026-09-20T10:00:00Z",
     });
 
     expect(markdown).toContain("# ✅ PR Re-Review — LCSP-329 Revised Auth/RBAC architecture");
     expect(markdown).toContain("Standard Auth module boundary");
     expect(markdown).toContain("RBAC owns authorization decisions");
     expect(markdown).toContain("<summary><strong>🔎 Changed scope reviewed</strong>");
+    expect(markdown).toContain("Exact-head CI:** ✅ success (2/2 complete)");
+    expect(markdown).toContain("GitHub mergeable:** ✅ MERGEABLE");
+    expect(markdown).toContain("Jira PR Link");
     expect(markdown).toContain("✅ No supported P0–P2 defect remains on this exact head.");
     expect(markdown).toContain("**Merge status:** ✅ READY");
     expect(markdown).not.toContain("## Recommended fix order");
+  });
+
+  it("does not render READY when exact-head CI failed even if code review passed", () => {
+    const markdown = reviewMarkdown({
+      verdict: "PASS",
+      summary: "Code review passed.",
+      jiraAlignment: "resolved",
+      specAlignment: "none",
+      testAssessment: "CI fetched from GitHub.",
+      findings: [],
+    }, {
+      repository: "example/repo",
+      number: 7,
+      title: "ABC-7 change",
+      body: "",
+      url: "https://github.com/example/repo/pull/7",
+      headSha: "c".repeat(40),
+      headBranch: "abc-7",
+      baseBranch: "main",
+      isDraft: false,
+      state: "OPEN",
+      author: "dev",
+      changedFiles: 2,
+    }, {
+      primaryKey: "ABC-7",
+      status: "resolved",
+      issues: [{ key: "ABC-7", summary: "Change", description: "", acceptanceCriteria: "Works", status: "In Review" }],
+      notes: "",
+      raw: "",
+    }, undefined, {
+      headSha: "c".repeat(40),
+      mergeable: "MERGEABLE",
+      checks: [{ name: "Tests", workflow: "CI", status: "COMPLETED", conclusion: "FAILURE", detailsUrl: "" }],
+      allChecksComplete: true,
+      ciConclusion: "failure",
+      checkedAt: "2026-09-20T10:00:00Z",
+    });
+
+    expect(markdown).toContain("Exact-head CI:** ❌ failure");
+    expect(markdown).toContain("**Merge status:** ❌ NOT READY — exact-head CI failed");
+  });
+
+  it("includes exact-head CI and mergeability in OpenCodeReview background", () => {
+    const background = buildOpenCodeReviewBackground({
+      pr: {
+        repository: "example/repo",
+        number: 42,
+        title: "ABC-42 harden auth",
+        body: "Review the auth boundary.",
+        url: "https://github.com/example/repo/pull/42",
+        headSha: "d".repeat(40),
+        headBranch: "abc-42",
+        baseBranch: "main",
+        isDraft: false,
+        state: "OPEN",
+        author: "dev",
+        changedFiles: 3,
+      },
+      jira: {
+        primaryKey: "ABC-42",
+        status: "resolved",
+        issues: [{ key: "ABC-42", summary: "Harden auth", description: "Boundary change", acceptanceCriteria: "Tests pass", status: "In Review" }],
+        notes: "",
+        raw: "",
+      },
+      spec: [],
+      githubGate: {
+        headSha: "d".repeat(40),
+        mergeable: "MERGEABLE",
+        checks: [
+          { name: "API unit tests", workflow: "Tests", status: "COMPLETED", conclusion: "FAILURE", detailsUrl: "" },
+          { name: "Lint", workflow: "Tests", status: "COMPLETED", conclusion: "SUCCESS", detailsUrl: "" },
+        ],
+        allChecksComplete: true,
+        ciConclusion: "failure",
+        checkedAt: "2026-09-20T10:00:00Z",
+      },
+    });
+
+    expect(background).toContain("Exact-head GitHub CI and mergeability");
+    expect(background).toContain("ci=failure");
+    expect(background).toContain("mergeable=MERGEABLE");
+    expect(background).toContain("Tests :: API unit tests :: status=COMPLETED :: conclusion=FAILURE");
   });
 
 });

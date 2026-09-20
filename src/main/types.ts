@@ -1,5 +1,5 @@
 export type ReviewStatus = "queued" | "running" | "completed" | "blocked" | "failed" | "cancelled";
-export type ReviewPhase = "queued" | "collecting-pr" | "resolving-jira" | "retrieving-spec" | "reviewing-diff" | "synthesizing" | "posting-comment" | "completed" | "blocked" | "failed" | "cancelled";
+export type ReviewPhase = "queued" | "collecting-pr" | "waiting-ci" | "resolving-jira" | "retrieving-spec" | "reviewing-diff" | "synthesizing" | "posting-comment" | "completed" | "blocked" | "failed" | "cancelled";
 export type RepositoryWebhookStatus = "pending" | "healthy" | "error" | "disabled";
 
 export interface ReviewConfig {
@@ -88,6 +88,23 @@ export interface PullRequestSummary {
   state: string;
   author: string;
   changedFiles: number;
+}
+
+export interface GitHubCheckStatus {
+  name: string;
+  workflow: string;
+  status: string;
+  conclusion: string;
+  detailsUrl: string;
+}
+
+export interface GitHubPullRequestGate {
+  headSha: string;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  checks: GitHubCheckStatus[];
+  allChecksComplete: boolean;
+  ciConclusion: "pending" | "success" | "failure" | "no-checks";
+  checkedAt: string;
 }
 
 export interface JiraIssueContext {
@@ -206,6 +223,7 @@ export interface ReviewRecord {
   rawReview?: string;
   result?: ParsedReviewResult;
   ocr?: OcrReviewMetadata;
+  githubGate?: GitHubPullRequestGate;
   commentPosted?: boolean;
   trigger?: string;
   error?: string;

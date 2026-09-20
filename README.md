@@ -13,6 +13,9 @@ GitHub pull_request webhook
   -> delivery idempotency check
   -> linked repository lookup
   -> re-read exact PR + current head SHA through gh
+  -> wait for every GitHub status/check on that exact head to reach a terminal state
+  -> require a short stable terminal window so dependent CI jobs can register
+  -> capture exact-head CI conclusions + GitHub mergeable state
   -> repository-scoped ChatGPT Project
   -> PR-scoped canonical ChatGPT conversation
   -> Jira key mapping from PR title/description
@@ -29,6 +32,8 @@ GitHub pull_request webhook
 ```
 
 Automatic review triggers on `pull_request` actions that can materially change review evidence: `opened`, `reopened`, `synchronize`, `ready_for_review`, and `edited`. `closed` updates the active PR list but does not run a review. A webhook head SHA that no longer matches GitHub's current PR head is ignored as stale.
+
+Before Jira resolution, ChatGPT/OCR work, or repository review begins, the runner polls GitHub's `statusCheckRollup` for the exact PR head. Pending/queued/in-progress checks keep the review in `waiting-ci`; terminal failures still allow code review to proceed after the complete CI picture is available and are rendered truthfully in the final review. If the PR head changes while waiting, that run is cancelled as superseded. A final exact-head CI/mergeability refresh is performed before publishing the review result.
 
 ## Repository management
 
