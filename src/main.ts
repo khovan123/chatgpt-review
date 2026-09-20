@@ -28,8 +28,26 @@ let webhookServer: GitHubWebhookServer | null = null;
 let cloudflare: CloudflareNamedTunnelManager | null = null;
 let cloudflareApi: CloudflareApiProvisioner | null = null;
 
+configureElectronRendering();
+
 const reviewActivity = new ReviewActivityBuffer();
 const execFileAsync = promisify(execFile);
+
+function configureElectronRendering(): void {
+  const override = process.env.CHATGPT_REVIEW_DISABLE_GPU?.trim().toLowerCase();
+  const forced = override === "1" || override === "true" || override === "yes";
+  const explicitlyEnabled = override === "0" || override === "false" || override === "no";
+  const headlessLinuxWorker = process.platform === "linux"
+    && Boolean(process.env.DISPLAY)
+    && !process.env.XDG_SESSION_TYPE;
+  if (explicitlyEnabled || (!forced && !headlessLinuxWorker)) return;
+
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch("disable-gpu");
+  app.commandLine.appendSwitch("disable-gpu-compositing");
+  app.commandLine.appendSwitch("disable-webgl");
+  app.commandLine.appendSwitch("disable-webgl2");
+}
 
 void app.whenReady().then(async () => {
   const userData = app.getPath("userData");
