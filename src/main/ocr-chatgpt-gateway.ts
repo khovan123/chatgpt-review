@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 
 import type { ChatGptWebDriver } from "./chatgpt-web-driver";
+import { makeOcrReviewTaskId } from "./review-activity";
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_WEB_PROMPT_BYTES = 116 * 1024;
@@ -394,7 +395,7 @@ function writeJson(response: ServerResponse, status: number, value: unknown): vo
 function taskIdForGatewayRequest(parentTaskId: string, affinity: string, nonce: string): string {
   const digest = createHash("sha256").update(affinity).update("\0").update(nonce).digest("hex").slice(0, 16);
   const parent = parentTaskId.trim();
-  return parent ? `${parent}__ocr_${digest}` : `review_${digest}`;
+  return parent ? makeOcrReviewTaskId(parent, digest) : `review_${digest}`;
 }
 
 function summarizeNewToolResults(messages: OpenAiMessage[], seen: Set<string>): string[] {

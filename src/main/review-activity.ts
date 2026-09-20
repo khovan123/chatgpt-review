@@ -3,6 +3,8 @@ import type { ReviewActivityEntry } from "./types";
 const MAX_ACTIVITY_PER_TASK = 120;
 const MAX_ACTIVITY_TASKS = 200;
 const MAX_ACTIVITY_MESSAGE = 2_000;
+const REVIEW_TASK_ID_PATTERN = /^review_[a-f0-9]{16}(?:__ocr_[a-f0-9]{16})?$/;
+const PARENT_REVIEW_TASK_ID_PATTERN = /^review_[a-f0-9]{16}$/;
 
 export interface ReviewActivityEvent {
   type: "state" | "progress";
@@ -61,14 +63,24 @@ export class ReviewActivityBuffer {
   }
 }
 
+export function isValidReviewTaskId(taskId: string): boolean {
+  return REVIEW_TASK_ID_PATTERN.test(taskId);
+}
+
+export function makeOcrReviewTaskId(parentTaskId: string, digest: string): string {
+  if (!PARENT_REVIEW_TASK_ID_PATTERN.test(parentTaskId)) {
+    throw new Error("Parent review task id is invalid.");
+  }
+  if (!/^[a-f0-9]{16}$/.test(digest)) {
+    throw new Error("OCR review task digest is invalid.");
+  }
+  return `${parentTaskId}__ocr_${digest}`;
+}
+
 export function canonicalReviewTaskId(taskId: string | undefined): string {
   if (!taskId) return "";
-  const marker = "__ocr_";
-  const markerIndex = taskId.indexOf(marker);
-  if (markerIndex > 0 && taskId.startsWith("review_")) {
-    return taskId.slice(0, markerIndex);
-  }
-  return taskId;
+  const match = taskId.match(/^(review_[a-f0-9]{16})(?:__ocr_[a-f0-9]{16})?$/);
+  return match?.[1] ?? taskId;
 }
 
 function compactActivityMessage(value: string): string {

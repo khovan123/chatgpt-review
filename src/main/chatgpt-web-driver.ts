@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { BrowserWindow, session, shell, type Session, type WebContents } from "electron";
 
+import { isValidReviewTaskId } from "./review-activity";
+
 const CHATGPT_URL = "https://chatgpt.com/";
 const PARTITION = "persist:chatgpt-pr-review";
 const POLL_MS = 400;
@@ -1305,7 +1307,7 @@ function progressSummary(text: string): string {
 }
 
 function assertTaskId(value: string): void {
-  if (!/^review_[a-f0-9]{16}$/.test(value)) throw new Error("Review task id is invalid.");
+  if (!isValidReviewTaskId(value)) throw new Error("Review task id is invalid.");
 }
 
 function delay(ms: number): Promise<void> {

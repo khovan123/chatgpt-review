@@ -72,7 +72,7 @@ describe("OCR ChatGPT Web OpenAI gateway", () => {
       fakeDriver as any,
       "https://chatgpt.com/g/g-p-fake/project",
       (message) => progress.push(message),
-      "review_parent",
+      "review_0123456789abcdef",
     );
     const binding = await gateway.start();
     try {
