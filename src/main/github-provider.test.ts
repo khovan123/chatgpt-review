@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeGitHubRepositoryInput } from "./github-provider";
+import { isSelfReviewRejection, normalizeGitHubRepositoryInput } from "./github-provider";
 
 describe("GitHub repository input normalization", () => {
   it("accepts owner/name and canonical HTTPS GitHub repository URLs", () => {
@@ -22,4 +22,11 @@ describe("GitHub repository input normalization", () => {
     expect(() => normalizeGitHubRepositoryInput("khovan123")).toThrow(/owner\/name/i);
     expect(() => normalizeGitHubRepositoryInput("https://github.com/khovan123/")).toThrow(/point directly/i);
   });
+
+  it("recognizes GitHub self-review rejections without masking unrelated failures", () => {
+    expect(isSelfReviewRejection(new Error("Can not approve your own pull request."))).toBe(true);
+    expect(isSelfReviewRejection(new Error("Can not request changes on your own pull request."))).toBe(true);
+    expect(isSelfReviewRejection(new Error("HTTP 403: Resource not accessible by integration"))).toBe(false);
+  });
+
 });

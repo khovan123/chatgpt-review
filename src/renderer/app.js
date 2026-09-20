@@ -364,6 +364,12 @@ function renderConnections() {
       view.chatgpt.ready ? "success" : "warning",
     ),
     connectionItem(
+      "OpenCodeReview",
+      view.ocr?.installed ? `v${view.ocr.version || "unknown"}` : "Missing",
+      view.ocr?.detail || "OpenCodeReview managed-agent engine is not available.",
+      view.ocr?.installed ? "success" : "danger",
+    ),
+    connectionItem(
       "Personal Cloudflare",
       tunnelStatus,
       cloudflareDetail,

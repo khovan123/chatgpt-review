@@ -8,6 +8,7 @@ import { ChatGptWebDriver } from "./main/chatgpt-web-driver";
 import { CloudflareApiProvisioner } from "./main/cloudflare-api";
 import { CloudflareNamedTunnelManager, cloudflareOriginUrl, normalizeCloudflareHostname } from "./main/cloudflare-tunnel";
 import { GitHubProvider, normalizeGitHubRepositoryInput } from "./main/github-provider";
+import { OpenCodeReviewProvider } from "./main/open-code-review";
 import { createRemoteAdminHandler, RemoteAdminTokenStore, type RemoteAdminBuildResult } from "./main/remote-admin";
 import { ReviewEngine, type ReviewEngineEvent } from "./main/review-engine";
 import { SpecMemoryStore } from "./main/spec-memory";
@@ -18,6 +19,7 @@ import { GitHubWebhookServer, WEBHOOK_HEALTH_PATH, WebhookSecretStore } from "./
 let mainWindow: BrowserWindow | null = null;
 let engine: ReviewEngine | null = null;
 let github: GitHubProvider | null = null;
+let ocr: OpenCodeReviewProvider | null = null;
 let state: StateStore | null = null;
 let specs: SpecMemoryStore | null = null;
 let chatgpt: ChatGptWebDriver | null = null;
@@ -44,10 +46,12 @@ void app.whenReady().then(async () => {
     publish({ type: "progress", taskId: progress.taskId, message: progress.text });
   });
   github = new GitHubProvider();
+  ocr = new OpenCodeReviewProvider();
   engine = new ReviewEngine({
     state,
     specs,
     github,
+    ocr,
     chatgpt,
     webhookSecret,
     onEvent: publish,

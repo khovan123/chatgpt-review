@@ -2,17 +2,16 @@ import { randomUUID } from "node:crypto";
 
 import { ChatGptWebDriver } from "./chatgpt-web-driver";
 import { GitHubProvider } from "./github-provider";
+import { OcrChatGptGateway } from "./ocr-chatgpt-gateway";
+import { OpenCodeReviewProvider } from "./open-code-review";
 import {
-  buildChunkReviewPrompt,
-  buildFinalReviewPrompt,
+  buildOpenCodeReviewBackground,
   buildJiraRepairPrompt,
   buildJiraResolutionPrompt,
   extractJiraKeys,
-  parseChunkReview,
-  parseFinalReview,
+  githubReviewEventForVerdict,
   parseJiraResolution,
   reviewMarkdown,
-  splitDiff,
 } from "./review-protocol";
 import { SpecMemoryStore } from "./spec-memory";
 import { makeRepository, StateStore } from "./state-store";
@@ -44,6 +43,7 @@ type EngineView = Omit<AppView, "webhook" | "tunnel" | "cloudflareProvisioning">
 export class ReviewEngine {
   private prs: PullRequestSummary[] = [];
   private providerStatus = { ghInstalled: false, ghAuthenticated: false, detail: "Not checked." };
+  private ocrStatus = { installed: false, version: "", detail: "Not checked." };
   private running = new Set<string>();
   private scheduled = new Set<string>();
   private activeReviewCount = 0;
@@ -55,13 +55,17 @@ export class ReviewEngine {
     state: StateStore;
     specs: SpecMemoryStore;
     github: GitHubProvider;
+    ocr: OpenCodeReviewProvider;
     chatgpt: ChatGptWebDriver;
     webhookSecret: string;
     onEvent?: (event: ReviewEngineEvent) => void;
   }) {}
 
   async initialize(): Promise<void> {
-    this.providerStatus = await this.dependencies.github.status();
+    [this.providerStatus, this.ocrStatus] = await Promise.all([
+      this.dependencies.github.status(),
+      this.dependencies.ocr.status(),
+    ]);
     if (!this.providerStatus.ghAuthenticated) return;
     for (const repository of this.dependencies.state.listRepositories()) {
       if (!repository.enabled) continue;
@@ -79,13 +83,17 @@ export class ReviewEngine {
       reviews: this.dependencies.state.listReviews(),
       repositories: this.dependencies.state.listRepositories(),
       provider: { ...this.providerStatus },
+      ocr: { ...this.ocrStatus },
       chatgpt: { ready: chatReady },
       prs: this.prs.map((pr) => ({ ...pr })),
     };
   }
 
   async refreshProviderStatus(): Promise<void> {
-    this.providerStatus = await this.dependencies.github.status();
+    [this.providerStatus, this.ocrStatus] = await Promise.all([
+      this.dependencies.github.status(),
+      this.dependencies.ocr.status(),
+    ]);
   }
 
   async linkRepository(repository: string): Promise<RepositoryRecord> {
@@ -345,12 +353,6 @@ export class ReviewEngine {
       await this.dependencies.state.upsertReview(record);
       await this.setPhase(record, "collecting-pr", `Collected ${repository} PR #${pr.number} at exact head ${pr.headSha.slice(0, 12)}.`);
 
-      const diff = await this.dependencies.github.getPullRequestDiff(repository, pr.number);
-      this.assertNotCancelled(record);
-      if (!diff.trim()) throw new Error("Pull request diff is empty.");
-      const diffChunks = splitDiff(diff, config.maxDiffChunkBytes);
-      if (!diffChunks.length) throw new Error("Pull request diff could not be chunked for review.");
-
       const projectUrl = await this.ensureRepositoryProject(repository);
       this.assertNotCancelled(record);
       const storedConversationUrl = this.dependencies.state.getPullRequestChatConversation(repository, pr.number);
@@ -451,41 +453,71 @@ export class ReviewEngine {
       const globalQuery = `${pr.title}\n${pr.body}\n${jiraText}`;
       const topSpec = this.dependencies.specs.search(globalQuery, 10);
 
-      const chunkReviews = [];
-      for (const chunk of diffChunks) {
-        await this.setPhase(record, "reviewing-diff", `Reviewing diff chunk ${chunk.index}/${diffChunks.length}: ${chunk.files.join(", ")}`);
-        const chunkSpec = this.dependencies.specs.search(`${globalQuery}\n${chunk.text.slice(0, 24_000)}`, 8);
-        const response = await this.dependencies.chatgpt.send(taskId, buildChunkReviewPrompt({
-          taskId,
+      await this.setPhase(record, "reviewing-diff", "OpenCodeReview managed agent is reviewing the exact PR head through the local ChatGPT Web LLM gateway.");
+      const ocrBackground = buildOpenCodeReviewBackground({ pr, jira, spec: topSpec });
+      const gateway = new OcrChatGptGateway(
+        this.dependencies.chatgpt,
+        projectUrl,
+        (message) => this.emit({
+          type: "progress",
+          reviewId: record!.id,
+          taskId: record!.taskId,
+          repository: record!.repository,
+          prNumber: record!.prNumber,
+          phase: record!.phase,
+          message,
+        }),
+      );
+
+      const gatewayBinding = await gateway.start();
+      try {
+        const managedReview = await this.dependencies.ocr.reviewPullRequest(
+          repository,
           pr,
-          jira,
-          spec: chunkSpec,
-          chunk,
-          totalChunks: diffChunks.length,
-        }), bindConversation);
+          ocrBackground,
+          gatewayBinding,
+        );
         this.assertNotCancelled(record);
-        await bindConversation(response.conversationUrl);
-        chunkReviews.push(parseChunkReview(response.text, taskId, chunk.index));
-        this.assertNotCancelled(record);
+        record.ocr = managedReview.metadata;
+        record.rawReview = managedReview.raw;
+        record.result = managedReview.result;
         record.updatedAt = new Date().toISOString();
         await this.dependencies.state.upsertReview(record);
+      } finally {
+        await gateway.stop().catch(() => undefined);
       }
 
-      await this.setPhase(record, "synthesizing", `Synthesizing ${chunkReviews.length} bounded review result(s).`);
-      const finalResponse = await this.dependencies.chatgpt.send(taskId, buildFinalReviewPrompt({ taskId, pr, jira, spec: topSpec, chunks: chunkReviews }), bindConversation);
-      this.assertNotCancelled(record);
-      await bindConversation(finalResponse.conversationUrl);
-      record.rawReview = finalResponse.text;
-      record.result = parseFinalReview(finalResponse.text, taskId);
+      await this.setPhase(
+        record,
+        "synthesizing",
+        `Using OpenCodeReview managed-agent result: ${record.ocr?.reviewedFiles ?? 0}/${record.ocr?.reviewableFiles ?? 0} selected files, ${record.result?.findings.length ?? 0} finding(s), ${record.ocr?.toolCalls ?? 0} tool call(s).`,
+      );
+      if (!record.result) throw new Error("OpenCodeReview managed review did not produce a normalized result.");
       this.assertNotCancelled(record);
 
-      if (record.result.verdict === "BLOCKED") return this.block(record, record.result.summary || "ChatGPT marked the review blocked by missing evidence.");
+      const blockedReason = record.result.verdict === "BLOCKED"
+        ? (record.result.summary || "ChatGPT marked the review blocked by missing evidence.")
+        : "";
 
+      let githubReviewMessage = " GitHub review submission is disabled in Review settings.";
       if (config.postComment) {
-        await this.setPhase(record, "posting-comment", "Posting the completed review to GitHub.");
-        await this.dependencies.github.postComment(repository, pr.number, reviewMarkdown(record.result, pr.headSha));
+        const reviewEvent = githubReviewEventForVerdict(record.result.verdict);
+        await this.setPhase(record, "posting-comment", `Submitting the completed ${reviewEvent} review to GitHub.`);
+        const submission = await this.dependencies.github.submitPullRequestReview(
+          repository,
+          pr.number,
+          reviewMarkdown(record.result, pr, jira, record.ocr),
+          reviewEvent,
+        );
         this.assertNotCancelled(record);
         record.commentPosted = true;
+        githubReviewMessage = submission.fallbackEvent
+          ? ` GitHub rejected the intended ${submission.event} self-review; ${submission.fallbackEvent} fallback submitted.`
+          : ` GitHub ${submission.event} review submitted.`;
+      }
+
+      if (blockedReason) {
+        return this.block(record, `${blockedReason}${githubReviewMessage}`);
       }
 
       this.assertNotCancelled(record);
@@ -494,10 +526,7 @@ export class ReviewEngine {
       record.completedAt = new Date().toISOString();
       record.updatedAt = record.completedAt;
       await this.dependencies.state.upsertReview(record);
-      const commentMessage = config.postComment
-        ? (record.commentPosted ? " GitHub comment posted." : " GitHub comment was not posted.")
-        : " GitHub comment posting is disabled in Review settings.";
-      this.emit({ type: "state", reviewId: record.id, taskId, repository, prNumber, phase: "completed", message: `${repository} PR #${pr.number} review completed: ${record.result.verdict}.${commentMessage}` });
+      this.emit({ type: "state", reviewId: record.id, taskId, repository, prNumber, phase: "completed", message: `${repository} PR #${pr.number} review completed: ${record.result.verdict}.${githubReviewMessage}` });
       return record;
     } catch (error) {
       if (record && (this.cancelledTasks.has(record.taskId) || this.dependencies.state.getReview(record.id)?.status === "cancelled")) {

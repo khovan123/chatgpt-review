@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
-import type { PullRequestSummary } from "./types";
+import type { GitHubPullRequestReviewEvent, PullRequestSummary } from "./types";
 
 const execFileAsync = promisify(execFile);
 const MAX_STDOUT = 16 * 1024 * 1024;
@@ -10,6 +10,12 @@ export interface GitHubWebhookRegistration {
   hookId: number;
   targetUrl: string;
   active: boolean;
+}
+
+export interface GitHubPullRequestReviewSubmission {
+  event: GitHubPullRequestReviewEvent;
+  fallbackEvent?: "COMMENT";
+  fallbackReason?: string;
 }
 
 export class GitHubProvider {
@@ -72,12 +78,34 @@ export class GitHubProvider {
     return runGh(["pr", "diff", String(prNumber), "-R", repository, "--patch"], MAX_STDOUT);
   }
 
-  async postComment(repository: string, prNumber: number, body: string): Promise<void> {
+  async submitPullRequestReview(
+    repository: string,
+    prNumber: number,
+    body: string,
+    event: GitHubPullRequestReviewEvent,
+  ): Promise<GitHubPullRequestReviewSubmission> {
     assertRepository(repository);
     assertPrNumber(prNumber);
-    if (!body.trim()) throw new Error("Review comment is empty.");
-    if (Buffer.byteLength(body, "utf8") > 60_000) throw new Error("Review comment exceeds the bounded GitHub comment size.");
-    await runGh(["pr", "comment", String(prNumber), "-R", repository, "--body", body], 256 * 1024);
+    assertReviewEvent(event);
+    const trimmed = body.trim();
+    if (!trimmed) throw new Error("Pull request review body is empty.");
+    if (Buffer.byteLength(trimmed, "utf8") > 60_000) throw new Error("Pull request review body exceeds the bounded GitHub review size.");
+
+    try {
+      await runGhJson("POST", `repos/${repository}/pulls/${prNumber}/reviews`, { body: trimmed, event });
+      return { event };
+    } catch (error) {
+      if (event === "COMMENT" || !isSelfReviewRejection(error)) throw error;
+      const fallbackBody = `${trimmed}\n\n---\n\n`
+        + `⚠️ Intended GitHub review event: ${event}. GitHub rejected the real review submission, likely because the authenticated account is the PR author. `
+        + `Submitting this as a COMMENT review fallback instead.`;
+      await runGhJson("POST", `repos/${repository}/pulls/${prNumber}/reviews`, { body: fallbackBody, event: "COMMENT" });
+      return { event, fallbackEvent: "COMMENT", fallbackReason: safeError(error) };
+    }
+  }
+
+  async postComment(repository: string, prNumber: number, body: string): Promise<void> {
+    await this.submitPullRequestReview(repository, prNumber, body, "COMMENT");
   }
 
   async ensureWebhook(repository: string, targetUrl: string, secret: string, knownHookId?: number | null): Promise<GitHubWebhookRegistration> {
@@ -242,6 +270,17 @@ function ghEnvironment(): NodeJS.ProcessEnv {
     XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
     GH_HOST: process.env.GH_HOST,
   };
+}
+
+function assertReviewEvent(event: GitHubPullRequestReviewEvent): void {
+  if (event !== "APPROVE" && event !== "REQUEST_CHANGES" && event !== "COMMENT") {
+    throw new Error("Pull request review event is invalid.");
+  }
+}
+
+export function isSelfReviewRejection(error: unknown): boolean {
+  const message = safeError(error).toLowerCase();
+  return /own pull request|pull request author|cannot approve|can not approve|can't approve|cannot request changes|can not request changes|can't request changes/.test(message);
 }
 
 function parsePullRequest(repository: string, value: unknown): PullRequestSummary {

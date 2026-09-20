@@ -225,6 +225,7 @@ function toRemoteAdminView(view: AppView): Record<string, unknown> {
       cloudflareHostname: text(config.cloudflareHostname),
     },
     provider: root.provider ?? null,
+    ocr: root.ocr ?? null,
     chatgpt: root.chatgpt ?? null,
     webhook: root.webhook ?? null,
     tunnel: root.tunnel ?? null,
@@ -375,7 +376,14 @@ function renderAdminHtml(initialView: Record<string, unknown> | null = null, ini
     .sidebar-scroll { min-height: 0; flex: 1; overflow-y: auto; padding: 18px 0 12px; }
     .sidebar-section-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 7px; color: var(--muted-2); font-size: 10px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
     .sidebar-repositories, .sidebar-reviews { display: grid; gap: 2px; }
+    .sidebar-reviews { padding-bottom: 8px; }
+    .sidebar-recents-collapsed .sidebar-reviews { display: none; }
     .repository-nav-item { position: relative; display: grid; grid-template-columns: 18px minmax(0,1fr) 8px; align-items: center; gap: 8px; width: 100%; min-height: 48px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); padding: 7px 9px; text-align: left; transition: background .15s ease, color .15s ease; }
+    .repository-nav-item.is-stale { opacity: .62; }
+    .sidebar-section-button { width: 100%; border: 0; background: transparent; color: inherit; padding: 0; text-align: left; }
+    .sidebar-section-button:hover { color: var(--foreground); }
+    .sidebar-section-chevron { display: inline-grid; width: 16px; height: 16px; place-items: center; color: var(--muted-2); font-size: 13px; transition: transform .15s ease; }
+    .sidebar-recents-collapsed .sidebar-section-chevron { transform: rotate(-90deg); }
     .repository-nav-item:hover { background: var(--sidebar-hover); color: var(--foreground); }
     .repository-nav-item.selected { background: var(--sidebar-active); color: var(--foreground); box-shadow: inset 0 0 0 1px var(--border); }
     .repository-active-accent { position: absolute; left: 0; top: 50%; width: 3px; height: 22px; transform: translateY(-50%); border-radius: 0 4px 4px 0; background: var(--primary); opacity: 0; }
@@ -473,7 +481,7 @@ function renderAdminHtml(initialView: Record<string, unknown> | null = null, ini
       <nav class="sidebar-scroll" aria-label="Repositories">
         <div class="sidebar-section-heading"><span>Repositories</span><span id="repoCount">0</span></div>
         <div id="repositories" class="sidebar-repositories"></div>
-        <div class="sidebar-section-heading" style="margin-top:18px"><span>Recent</span><span id="reviewCount">0</span></div>
+        <button id="recentToggle" class="sidebar-section-heading sidebar-section-button" style="margin-top:18px" data-action="toggle-recent" type="button"><span>Recent</span><span><span id="reviewCount">0</span><span class="sidebar-section-chevron" aria-hidden="true">⌄</span></span></button>
         <div id="sidebarReviews" class="sidebar-reviews"></div>
       </nav>
       <div class="sidebar-footer">
@@ -497,7 +505,7 @@ function renderAdminHtml(initialView: Record<string, unknown> | null = null, ini
 <script>
 const BOOTSTRAP_VIEW = ${safeScriptJson(initialView)};
 const BOOTSTRAP_ERROR = ${safeScriptJson(initialError)};
-const state = { view: null, busy: false, selectedRepo: '', selectedPr: 0, showOverview: true };
+const state = { view: null, busy: false, selectedRepo: '', selectedPr: 0, showOverview: true, recentCollapsed: false, lastViewJson: '' };
 window.addEventListener('error', (event) => showFatal(event.message || String(event.error || 'Unknown script error')));
 window.addEventListener('unhandledrejection', (event) => showFatal(event.reason && event.reason.message ? event.reason.message : String(event.reason || 'Unhandled promise rejection')));
 const tokenInput = document.getElementById('token');
@@ -513,7 +521,7 @@ document.getElementById('tokenForm').addEventListener('submit', (event) => {
   localStorage.setItem('chatgpt-review-admin-token', token);
   location.href = '/admin/?token=' + encodeURIComponent(token) + '&v=' + Date.now();
 });
-document.getElementById('reload').addEventListener('click', () => { bootstrapConsumed = true; void load(true); });
+document.getElementById('reload').addEventListener('click', () => { bootstrapConsumed = true; void load(true, { silent: false, forceRender: true }); });
 document.addEventListener('click', (event) => {
   const element = event.target instanceof Element ? event.target.closest('[data-action]') : null;
   if (!element) return;
@@ -535,6 +543,9 @@ document.addEventListener('click', (event) => {
     } else if (action === 'show-overview') {
       state.showOverview = true;
       render();
+    } else if (action === 'toggle-recent') {
+      state.recentCollapsed = !state.recentCollapsed;
+      renderSidebar();
     } else if (action === 'refresh-prs') {
       void post('/admin/api/prs/refresh', { repository: repository || undefined });
     } else if (action === 'sync-webhook') {
@@ -577,7 +588,7 @@ async function post(path, body, refresh) {
   try {
     setBusy(true);
     const payload = await api(path, { method: 'POST', body: JSON.stringify(body || {}) });
-    if (refresh !== false) await load(true);
+    if (refresh !== false) await load(true, { silent: false, forceRender: true });
     return payload;
   } catch (error) {
     showNotice(error.message || String(error), true);
@@ -589,11 +600,13 @@ async function post(path, body, refresh) {
 async function buildApp() {
   const result = await post('/admin/api/system/build', {}, false);
   showNotice((result && result.output) || 'Build finished.', !(result && result.ok));
-  await load(true);
+  await load(true, { silent: false, forceRender: true });
 }
-async function load(forceApi) {
+async function load(forceApi, options) {
+  const silent = options && options.silent === true;
+  const forceRender = options && options.forceRender === true;
   try {
-    setBusy(true);
+    if (!silent) setBusy(true);
     if (BOOTSTRAP_ERROR && !bootstrapConsumed && !forceApi) {
       bootstrapConsumed = true;
       setAuthMessage(BOOTSTRAP_ERROR, false);
@@ -601,6 +614,7 @@ async function load(forceApi) {
     }
     if (BOOTSTRAP_VIEW && !bootstrapConsumed && !forceApi) {
       state.view = BOOTSTRAP_VIEW;
+      state.lastViewJson = JSON.stringify(BOOTSTRAP_VIEW);
       bootstrapConsumed = true;
       setAuthMessage(viewSummary(state.view), true);
       ensureSelection();
@@ -612,26 +626,34 @@ async function load(forceApi) {
       setAuthMessage('Paste the remote admin token, then Save.', false);
       return renderShellEmpty('Waiting for remote admin token.');
     }
-    state.view = await api('/admin/api/view');
+    const nextView = await api('/admin/api/view');
+    const nextViewJson = JSON.stringify(nextView);
+    const changed = nextViewJson !== state.lastViewJson;
+    state.view = nextView;
+    state.lastViewJson = nextViewJson;
     setAuthMessage(viewSummary(state.view), true);
     ensureSelection();
-    render();
+    if (!silent || forceRender || changed) render();
   } catch (error) {
     const message = error.message || String(error);
-    setAuthMessage(message, false);
-    renderShellEmpty(message);
+    if (!silent) {
+      setAuthMessage(message, false);
+      renderShellEmpty(message);
+    }
   } finally {
-    setBusy(false);
+    if (!silent) setBusy(false);
   }
 }
 function setBusy(value) { state.busy = value; document.querySelectorAll('button').forEach((button) => { button.disabled = value; }); }
-function setAuthMessage(message, ok) { document.getElementById('auth-message').innerHTML = '<span class="' + (ok ? 'ok' : 'bad') + '">' + escapeHtml(message) + '</span>'; }
+function setHtmlIfChanged(id, html) { const node = document.getElementById(id); if (node && node.innerHTML !== html) node.innerHTML = html; }
+function setTextIfChanged(id, value) { const node = document.getElementById(id); const text = String(value); if (node && node.textContent !== text) node.textContent = text; }
+function setAuthMessage(message, ok) { setHtmlIfChanged('auth-message', '<span class="' + (ok ? 'ok' : 'bad') + '">' + escapeHtml(message) + '</span>'); }
 function showNotice(message, error) { const node = document.getElementById('notice'); node.className = 'notice' + (error ? ' error' : ''); node.textContent = message; setTimeout(() => { node.classList.add('hidden'); }, 7000); }
 function showFatal(message) { setAuthMessage(message, false); renderShellEmpty(message); }
 function renderShellEmpty(message) {
-  document.getElementById('repositories').innerHTML = '<div class="empty">' + escapeHtml(message) + '</div>';
-  document.getElementById('prs').innerHTML = '<div class="empty">' + escapeHtml(message) + '</div>';
-  document.getElementById('detail').innerHTML = '<div class="review-list" style="padding-top:28px"><div class="review-item"><div class="review-error">' + escapeHtml(message) + '</div></div></div>';
+  setHtmlIfChanged('repositories', '<div class="empty">' + escapeHtml(message) + '</div>');
+  setHtmlIfChanged('prs', '<div class="empty">' + escapeHtml(message) + '</div>');
+  setHtmlIfChanged('detail', '<div class="review-list" style="padding-top:28px"><div class="review-item"><div class="review-error">' + escapeHtml(message) + '</div></div></div>');
 }
 function ensureSelection() {
   const repos = repositories();
@@ -652,41 +674,63 @@ function prs() { return (state.view && state.view.prs) || []; }
 function reviews() { return (state.view && state.view.reviews) || []; }
 function prsForRepo(repository) { return prs().filter((pr) => !repository || pr.repository === repository); }
 function reviewsFor(repository, prNumber) { return reviews().filter((review) => review.repository === repository && Number(review.prNumber) === Number(prNumber)); }
+function reviewTimestamp(review) { return review.updatedAt || review.completedAt || review.startedAt || ''; }
+function latestReviewGroups() {
+  const map = new Map();
+  for (const review of reviews()) {
+    const key = review.repository + '#' + String(review.prNumber);
+    const existing = map.get(key);
+    if (!existing || reviewTimestamp(review) > reviewTimestamp(existing)) map.set(key, review);
+  }
+  return Array.from(map.values()).sort((a, b) => reviewTimestamp(b).localeCompare(reviewTimestamp(a)));
+}
 function renderSidebar() {
   const repos = repositories();
-  document.getElementById('repoCount').textContent = String(repos.length);
-  document.getElementById('reviewCount').textContent = String(reviews().length);
-  document.getElementById('repositories').innerHTML = repos.map((repo) => {
+  const latestReviews = latestReviewGroups();
+  setTextIfChanged('repoCount', repos.length);
+  setTextIfChanged('reviewCount', latestReviews.length);
+  const recentToggle = document.getElementById('recentToggle');
+  if (recentToggle) recentToggle.classList.toggle('sidebar-recents-collapsed', state.recentCollapsed);
+  const repositoriesHtml = repos.map((repo) => {
     const health = repo.webhook && repo.webhook.status === 'healthy' ? 'success' : repo.enabled ? 'warning' : 'danger';
     const selected = repo.fullName === state.selectedRepo && !state.showOverview;
     const prCount = prsForRepo(repo.fullName).length;
     return '<button class="repository-nav-item ' + (selected ? 'selected' : '') + '" data-action="select-repo" data-repository="' + escapeAttr(repo.fullName) + '" type="button"><span class="repository-active-accent"></span><span class="repository-icon">▱</span><span class="repository-nav-copy"><span class="repository-nav-name">' + escapeHtml(repo.fullName) + '</span><span class="repository-nav-meta">' + prCount + ' open PRs</span></span><span class="repo-health ' + health + '"></span></button>';
   }).join('') || '<div class="empty">No repositories linked.</div>';
-  document.getElementById('sidebarReviews').innerHTML = reviews().slice(0, 8).map((review) => {
+  setHtmlIfChanged('repositories', repositoriesHtml);
+  const sidebarReviews = document.getElementById('sidebarReviews');
+  sidebarReviews.classList.toggle('hidden', state.recentCollapsed);
+  const sidebarReviewsHtml = latestReviews.slice(0, 8).map((review) => {
     const selected = review.repository === state.selectedRepo && Number(review.prNumber) === Number(state.selectedPr) && !state.showOverview;
-    return '<button class="repository-nav-item ' + (selected ? 'selected' : '') + '" data-action="select-pr" data-repository="' + escapeAttr(review.repository) + '" data-pr-number="' + String(review.prNumber) + '" type="button"><span class="repository-active-accent"></span><span class="repository-icon">#</span><span class="repository-nav-copy"><span class="repository-nav-name">PR #' + String(review.prNumber) + ' · ' + escapeHtml(review.phase || review.status) + '</span><span class="repository-nav-meta">' + escapeHtml(review.status || '') + '</span></span><span class="repo-health ' + statusTone(review.status) + '"></span></button>';
+    const currentHead = prs().find((pr) => pr.repository === review.repository && Number(pr.number) === Number(review.prNumber))?.headSha || '';
+    const stale = currentHead && review.headSha && currentHead !== review.headSha;
+    return '<button class="repository-nav-item ' + (selected ? 'selected ' : '') + (stale ? 'is-stale' : '') + '" data-action="select-pr" data-repository="' + escapeAttr(review.repository) + '" data-pr-number="' + String(review.prNumber) + '" type="button"><span class="repository-active-accent"></span><span class="repository-icon">#</span><span class="repository-nav-copy"><span class="repository-nav-name">PR #' + String(review.prNumber) + ' · ' + escapeHtml(review.phase || review.status) + '</span><span class="repository-nav-meta">' + escapeHtml(review.status || '') + (stale ? ' · stale' : '') + '</span></span><span class="repo-health ' + statusTone(review.status) + '"></span></button>';
   }).join('') || '<div class="empty">No reviews yet.</div>';
+  setHtmlIfChanged('sidebarReviews', sidebarReviewsHtml);
 }
 function renderPrList() {
   const list = prsForRepo(state.selectedRepo);
-  document.getElementById('prCount').textContent = String(list.length || prs().length);
+  setTextIfChanged('prCount', list.length || prs().length);
   const source = list.length ? list : prs();
-  document.getElementById('prs').innerHTML = source.map((pr) => {
+  const prsHtml = source.map((pr) => {
     const selected = pr.repository === state.selectedRepo && Number(pr.number) === Number(state.selectedPr) && !state.showOverview;
     const latest = reviewsFor(pr.repository, pr.number)[0];
     return '<button class="pr-nav-item ' + (selected ? 'selected' : '') + '" data-action="select-pr" data-repository="' + escapeAttr(pr.repository) + '" data-pr-number="' + String(pr.number) + '" type="button"><span class="pr-nav-top"><span class="pr-number">#' + String(pr.number) + '</span>' + (latest ? badge(latest.status, statusTone(latest.status)) : '<span class="repository-nav-meta">unreviewed</span>') + '</span><span class="pr-nav-title">' + escapeHtml(pr.title) + '</span><span class="pr-nav-meta">' + escapeHtml(pr.headBranch + ' → ' + pr.baseBranch) + ' · ' + String(pr.changedFiles || 0) + ' files</span></button>';
   }).join('') || '<div class="empty">No open PRs loaded.</div>';
+  setHtmlIfChanged('prs', prsHtml);
 }
 function renderOverview() {
   const view = state.view;
   const webhook = view.webhook || {};
   const tunnel = view.tunnel || {};
   const provider = view.provider || {};
+  const ocr = view.ocr || {};
   const chatgpt = view.chatgpt || {};
-  document.getElementById('detail').innerHTML = '<header class="pr-detail-header"><div class="pr-detail-title-group"><div class="mono-label">REMOTE ADMIN</div><h2>ChatGPT Review workspace</h2><p class="pr-detail-meta">Manage the VPS worker with the same navigation model as the desktop app.</p></div><div class="workspace-actions"><button class="button secondary" data-action="refresh-prs">Refresh PRs</button><button class="button" data-action="chatgpt-setup">Open ChatGPT setup</button></div></header>'
+  const detailHtml = '<header class="pr-detail-header"><div class="pr-detail-title-group"><div class="mono-label">REMOTE ADMIN</div><h2>ChatGPT Review workspace</h2><p class="pr-detail-meta">Manage the VPS worker with the same navigation model as the desktop app.</p></div><div class="workspace-actions"><button class="button secondary" data-action="refresh-prs">Refresh PRs</button><button class="button" data-action="chatgpt-setup">Open ChatGPT setup</button></div></header>'
     + '<div class="history-heading"><div><p class="column-eyebrow">STATUS</p><h3>Connections</h3></div><span class="count-pill">' + String(repositories().length) + '</span></div>'
     + '<div class="overview-grid"><section class="panel-card"><h3>Connection status</h3><div class="connection-list">'
     + connectionRow('GitHub CLI', provider.ghAuthenticated ? 'Ready' : provider.detail || 'Not ready', provider.ghAuthenticated)
+    + connectionRow('OpenCodeReview', ocr.installed ? ('v' + (ocr.version || 'unknown')) : (ocr.detail || 'Missing'), Boolean(ocr.installed))
     + connectionRow('ChatGPT Web', chatgpt.ready ? 'Ready' : 'Setup required', chatgpt.ready)
     + connectionRow('Local webhook', webhook.listening ? webhook.localUrl : webhook.lastError || 'Stopped', webhook.listening)
     + connectionRow('Cloudflare tunnel', tunnel.running && tunnel.reachable ? tunnel.publicUrl : tunnel.lastError || 'Not ready', tunnel.running && tunnel.reachable)
@@ -694,12 +738,14 @@ function renderOverview() {
     + '<section class="panel-card"><h3>Repository</h3><p>Link repositories and keep GitHub webhook configuration synchronized.</p><div class="setting-grid"><input id="repoInput" placeholder="owner/repo" value="' + escapeAttr(state.selectedRepo || '') + '" /><button class="button" data-action="link-repo">Link</button></div><div class="button-row" style="margin-top:8px"><button class="button secondary" data-action="sync-webhook">Sync webhook</button><button class="button secondary" data-action="refresh-prs">Refresh PRs</button><button class="button danger" data-action="unlink-repo">Unlink</button></div></section>'
     + '<section class="panel-card"><h3>GitHub setup</h3><p>Paste a GitHub token once. The app passes it to gh auth login --with-token.</p><div class="setting-grid"><input id="github-token" type="password" placeholder="GitHub token" /><button class="button" data-action="github-auth">Authenticate gh</button></div></section>'
     + '<section class="panel-card"><h3>Operations</h3><p>Build or restart worker-side services from the browser.</p><div class="button-row"><button class="button secondary" data-action="cloudflare-restart">Restart Cloudflare tunnel</button><button class="button secondary" data-action="build-app">Run npm build</button></div></section></div>';
+  setHtmlIfChanged('detail', detailHtml);
 }
 function renderPrDetail() {
   const pr = prs().find((item) => item.repository === state.selectedRepo && Number(item.number) === Number(state.selectedPr));
   if (!pr) return renderOverview();
   const items = reviewsFor(pr.repository, pr.number);
-  document.getElementById('detail').innerHTML = '<header class="pr-detail-header"><div class="pr-detail-title-group"><div class="mono-label">PR #' + String(pr.number) + '</div><h2>' + escapeHtml(pr.title) + '</h2><p class="pr-detail-meta">' + escapeHtml(pr.repository + ' · ' + pr.headBranch + ' → ' + pr.baseBranch + ' · ' + String(pr.changedFiles || 0) + ' changed files') + '</p></div><div class="workspace-actions"><a class="button secondary" href="' + escapeAttr(pr.url) + '" target="_blank">Open PR</a><button class="button" data-action="run-review" data-repository="' + escapeAttr(pr.repository) + '" data-pr-number="' + String(pr.number) + '" data-force="false">Review now</button><button class="button secondary" data-action="run-review" data-repository="' + escapeAttr(pr.repository) + '" data-pr-number="' + String(pr.number) + '" data-force="true">Re-review head</button></div></header><div class="history-heading"><div><p class="column-eyebrow">HISTORY</p><h3>Review runs</h3></div><span class="count-pill">' + String(items.length) + '</span></div><div class="review-list">' + (items.map(renderReview).join('') || '<div class="review-item"><div class="review-summary">No reviews yet.</div></div>') + '</div>';
+  const detailHtml = '<header class="pr-detail-header"><div class="pr-detail-title-group"><div class="mono-label">PR #' + String(pr.number) + '</div><h2>' + escapeHtml(pr.title) + '</h2><p class="pr-detail-meta">' + escapeHtml(pr.repository + ' · ' + pr.headBranch + ' → ' + pr.baseBranch + ' · ' + String(pr.changedFiles || 0) + ' changed files') + '</p></div><div class="workspace-actions"><a class="button secondary" href="' + escapeAttr(pr.url) + '" target="_blank">Open PR</a><button class="button" data-action="run-review" data-repository="' + escapeAttr(pr.repository) + '" data-pr-number="' + String(pr.number) + '" data-force="false">Review now</button><button class="button secondary" data-action="run-review" data-repository="' + escapeAttr(pr.repository) + '" data-pr-number="' + String(pr.number) + '" data-force="true">Re-review head</button></div></header><div class="history-heading"><div><p class="column-eyebrow">HISTORY</p><h3>Review runs</h3></div><span class="count-pill">' + String(items.length) + '</span></div><div class="review-list">' + (items.map(renderReview).join('') || '<div class="review-item"><div class="review-summary">No reviews yet.</div></div>') + '</div>';
+  setHtmlIfChanged('detail', detailHtml);
 }
 function renderReview(review) {
   const canCancel = review.status === 'running' || review.status === 'queued';
@@ -711,8 +757,12 @@ function statusTone(status) { if (status === 'completed') return 'success'; if (
 function viewSummary(view) { return 'Token accepted. Loaded ' + ((view.repositories || []).length) + ' repo(s), ' + ((view.prs || []).length) + ' PR(s), ' + ((view.reviews || []).length) + ' review(s).'; }
 function escapeHtml(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch])); }
 function escapeAttr(value) { return escapeHtml(value).replace(/\`/g, '&#096;'); }
-void load(false);
-setInterval(() => { void load(true); }, 5000);
+void load(false, { silent: false, forceRender: true });
+setInterval(() => {
+  if (!state.busy && document.visibilityState === 'visible') {
+    void load(true, { silent: true });
+  }
+}, 5000);
 </script>
 </body>
 </html>`;

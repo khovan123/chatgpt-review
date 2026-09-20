@@ -152,7 +152,28 @@ export interface ReviewFinding {
   jiraRef: string;
   specRef: string;
   suggestion: string;
+  impact?: string;
+  reproduction?: string;
+  regressionTests?: string;
 }
+
+export interface OcrReviewMetadata {
+  mode: "managed" | "delegation";
+  version: string;
+  schemaVersion: string;
+  status: string;
+  model: string;
+  sessionId: string;
+  totalFiles: number;
+  reviewableFiles: number;
+  excludedFiles: number;
+  reviewedFiles: number;
+  toolCalls: number;
+  toolCallFailures: number;
+  excluded: Array<{ path: string; reason: string }>;
+}
+
+export type GitHubPullRequestReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 
 export interface ParsedReviewResult {
   verdict: "PASS" | "CHANGES_REQUESTED" | "BLOCKED";
@@ -182,6 +203,7 @@ export interface ReviewRecord {
   conversationUrl?: string;
   rawReview?: string;
   result?: ParsedReviewResult;
+  ocr?: OcrReviewMetadata;
   commentPosted?: boolean;
   trigger?: string;
   error?: string;
@@ -237,6 +259,11 @@ export interface AppView {
   provider: {
     ghInstalled: boolean;
     ghAuthenticated: boolean;
+    detail: string;
+  };
+  ocr: {
+    installed: boolean;
+    version: string;
     detail: string;
   };
   chatgpt: {

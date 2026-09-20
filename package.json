@@ -14,6 +14,7 @@
     "start": "npm run build && electron ."
   },
   "dependencies": {
+    "@alibaba-group/open-code-review": "^1.12.5",
     "mammoth": "^1.10.0",
     "pdf-parse": "1.1.1"
   },

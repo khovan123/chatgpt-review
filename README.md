@@ -1,6 +1,6 @@
 # ChatGPT Review
 
-Desktop PR-review app that uses **ChatGPT Web only** for model reasoning. Reviews are event-driven from signed GitHub webhooks and combine the exact PR/head diff, Jira evidence fetched through ChatGPT's Atlassian connector, and attached specification files used as local RAG memory.
+Desktop PR-review app that uses **OpenCodeReview managed-agent mode** for code review and **ChatGPT Web** as a local OpenAI-compatible LLM backend. OCR owns file selection, grouping, repository tool calls, code navigation, filtering, findings, sessions and coverage. Jira evidence and attached specification memory are supplemental review background.nistic review selection/rules and **ChatGPT Web** for model reasoning. Reviews are event-driven from signed GitHub webhooks. Code/diff evidence is primary; Jira evidence and attached specification memory are supplemental requirement context. No separate OCR model/API key is required.
 
 ## Event-driven flow
 
@@ -17,10 +17,15 @@ GitHub pull_request webhook
   -> PR-scoped canonical ChatGPT conversation
   -> Jira key mapping from PR title/description
   -> Jira evidence through ChatGPT Atlassian connector
-  -> relevant spec-memory retrieval
-  -> bounded diff review chunks in ChatGPT Web
-  -> final synthesis
-  -> optional GitHub PR comment
+  -> relevant spec-memory retrieval (optional)
+  -> temporary exact-head Git checkout
+  -> temporary exact-head Git checkout
+  -> local authenticated OpenAI-compatible gateway backed by ChatGPT Web
+  -> ocr review --format json --audience agent
+  -> OCR-managed grouping + repository tool-call loop + filtering
+  -> OCR run manifest / coverage / tool-call validation
+  -> normalize OCR findings to app verdict
+  -> optional GitHub Pull Request Review (APPROVE / REQUEST_CHANGES; COMMENT fallback for self-review)
 ```
 
 Automatic review triggers on `pull_request` actions that can materially change review evidence: `opened`, `reopened`, `synchronize`, `ready_for_review`, and `edited`. `closed` updates the active PR list but does not run a review. A webhook head SHA that no longer matches GitHub's current PR head is ignored as stale.
@@ -130,6 +135,26 @@ The review context is isolated with these invariants:
 
 Different PRs may review concurrently. Each active review gets its own hidden Electron `BrowserWindow` while all windows share the signed-in persistent ChatGPT session. Concurrency is bounded to **3 active reviews** to protect the VPS/browser session. The same PR is still serialized/coalesced so two review turns cannot race inside its canonical conversation. Project creation/recovery for the same repository is also serialized to prevent duplicate Projects.
 
+## OpenCodeReview managed agent
+
+The review engine pins `@alibaba-group/open-code-review` and runs the normal OCR-managed `ocr review` workflow. ChatGPT Web is exposed only on loopback through a short-lived bearer-authenticated OpenAI-compatible gateway; OCR sees it as the configured model endpoint and remains responsible for the agent loop.
+
+For every PR review the app:
+
+1. creates a temporary Git checkout through the authenticated `gh` CLI;
+2. fetches the PR ref and base branch and verifies the fetched head SHA exactly matches the GitHub PR head already collected by the app;
+3. runs `ocr review --preview --format json --audience agent` to capture deterministic selection/exclusions;
+4. starts a loopback-only `/v1/chat/completions` gateway backed by the signed-in ChatGPT Web session;
+5. runs `ocr review --format json --audience agent --from <base> --to <exact-head>` with OCR configured to use that gateway;
+6. lets OCR perform grouping, full-file reads, code search, changed-file inspection, `code_comment`, `task_done`, filtering and session/manifest tracking;
+7. parses OCR's JSON output, run manifest, coverage and tool-call counters directly — there is no second app-owned code-review synthesis prompt;
+8. fails closed when selected-file coverage is incomplete, OCR reports failed subtasks, or any OCR tool call fails;
+9. removes the temporary checkout and stops the gateway after the run.
+
+The gateway does **not** execute OCR repository tools. It only converts OCR's OpenAI Chat Completions requests into bounded ChatGPT Web turns and converts the structured response back into native OpenAI `tool_calls`. This keeps OpenCodeReview, not chatgpt-review, in control of repository exploration and review decisions.
+
+Jira and spec context are compact optional background. They do not replace code evidence and they do not decide which repository tools OCR calls.
+
 ## Jira mapping
 
 Jira keys matching `PROJECT-123` are collected deterministically from PR title first and description second, with duplicates removed. When a key exists, ChatGPT must use the Atlassian/Jira connector and return exact issue context. Returned keys must match keys extracted from the PR. By default the review fails closed when a referenced Jira issue cannot be resolved.
@@ -152,6 +177,8 @@ The primary UI follows the SourceNerve workspace pattern:
 ## Requirements
 
 - Node.js 22.12+
+- Git 2.41+
+- bundled/pinned OpenCodeReview dependency installed by `npm install`
 - `cloudflared` available on `PATH`
 - a Cloudflare account with at least one active zone for automatic provisioning
 - a one-time user-owned Cloudflare API token scoped to Cloudflare Tunnel Edit, DNS Edit, and Zone Read (or, in Advanced mode, an existing named-tunnel hostname + runtime token)
@@ -189,8 +216,9 @@ webhook/manual trigger
   -> collecting-pr
   -> resolving-jira
   -> retrieving-spec
-  -> reviewing-diff (1..N chunks)
-  -> synthesizing
+  -> reviewing-diff (OCR managed agent + ChatGPT Web LLM gateway)
+  -> OCR manifest / coverage / tool-call validation
+  -> synthesizing (normalize OCR result only)
   -> posting-comment (optional)
   -> completed
 
